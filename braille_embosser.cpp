@@ -36,6 +36,7 @@ optical OpticalPaper = optical(PORT5);
 distance DistanceBed = distance(PORT6);
 bumper BumperTop = bumper(PORT7);
 touchled TouchStatus = touchled(PORT8);
+controller Controller = controller();
 
 
 // generating and setting random seed
@@ -108,14 +109,7 @@ void vexcodeInit() {
 
 #pragma endregion VEXcode Generated Robot Configuration
 
-#include "vex.h"
-#include "iq_cpp.h"
 #include <cmath>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-
-using namespace vex;
 
 
 
@@ -129,10 +123,14 @@ const double CHAR_GAP_FEED_DEG   = 90.0;//like the gap between chars
 const double EJECT_FEED_DEG      = 540.0;//y encoder rotation to eject finished label
 const double CLAMP_ENGAGE_DEG    = 65.0;
 const double DEFAULT_PUNCH_DEG   = 115.0;//ts a default val i got online might need to change
+const double MIN_PUNCH_DEG       = 100.0;
+const double MAX_PUNCH_DEG       = 130.0;
 const double POS_TOLERANCE_DEG   = 2.5;
 const double STALL_CURRENT_AMP   = 1.15;//motor stall current threshold ( in amps)
+const double PAPER_BRIGHTNESS_MIN = 30.0;
 const int    PUNCH_DWELL_MSEC    = 300;
 const int    MAX_WORD_LENGTH     = 16; //max amt of chars u can q per like job
+const bool   MIRROR_COLUMNS_FOR_DOWNWARD_PUNCH = false;
 
 // found this online so if its wrong its NOT my fault 😊✌️
 const bool BRAILLE_ALPHABET[26][3][2] = {
@@ -186,7 +184,7 @@ bool homeAllAxes(double &calibratedPunchDeg)
     }
     MotorZ.stop(hold);
 
-    if (false) {
+    if (!BumperTop.pressing()) {
         TouchStatus.on(red);
         Brain.Screen.newLine();
         Brain.Screen.print("Fault: Z Limit Timeout");
@@ -207,7 +205,7 @@ bool homeAllAxes(double &calibratedPunchDeg)
     //home the x-axis carriage to the left dege
     homingTimer.clear();
     MotorX.spin(forward, 15, percent);
-    while (!BumperTop.pressing() && homingTimer.time(msec) < 5000 && (homingTimer.time(msec) < 150 || MotorX.current(amp) < STALL_CURRENT_AMP)) 
+    while (homingTimer.time(msec) < 5000 && (homingTimer.time(msec) < 150 || MotorX.current(amp) < STALL_CURRENT_AMP)) 
     {
         wait(10, msec);
     }
@@ -221,6 +219,10 @@ bool homeAllAxes(double &calibratedPunchDeg)
     {
         //cale punch stroke to be propor to measured gantry-to-bed height
         calibratedPunchDeg = DEFAULT_PUNCH_DEG + (measuredBedDist - 60.0) * 1.4;
+        if (calibratedPunchDeg < MIN_PUNCH_DEG)
+            calibratedPunchDeg = MIN_PUNCH_DEG;
+        else if (calibratedPunchDeg > MAX_PUNCH_DEG)
+            calibratedPunchDeg = MAX_PUNCH_DEG;
     } 
     else
         calibratedPunchDeg = DEFAULT_PUNCH_DEG;
@@ -244,7 +246,7 @@ bool checkSafetyAndPaper(bool &isPaused, timer &jobTimer)
 
     // Check Optical Sensor brightness/hue for missing paper and Distance Sensor for hand intrusion
     double bedClearanceMm = DistanceBed.objectDistance(mm);
-    bool paperMissing = (OpticalPaper.hue() > 200 && OpticalPaper.hue() < 260); // Dark bed visible when strip runs out
+    bool paperMissing = (!OpticalPaper.isNearObject() || OpticalPaper.brightness() < PAPER_BRIGHTNESS_MIN); // Dark bed visible when strip runs out
     bool obstructionDetected = (bedClearanceMm < 25.0);
 
     if (paperMissing || obstructionDetected) 
@@ -259,6 +261,8 @@ bool checkSafetyAndPaper(bool &isPaused, timer &jobTimer)
     //lets it like enter safe pause state so stop motors and set status LED to Yellow
     MotorX.stop(brake);
     MotorFeed.stop(brake);
+    MotorZ.stop(hold);
+    MotorClamp.stop(hold);
     TouchStatus.on(yellow);
 
     Brain.Screen.clearScreen();
@@ -272,6 +276,8 @@ bool checkSafetyAndPaper(bool &isPaused, timer &jobTimer)
     
     Brain.Screen.newLine();
     Brain.Screen.print("Load paper & tap LED");
+    Brain.Screen.newLine();
+    Brain.Screen.print("Job Time: %.1fs", jobTimer.time(seconds));
 
     timer pauseTimer;
     pauseTimer.clear();
@@ -280,7 +286,7 @@ bool checkSafetyAndPaper(bool &isPaused, timer &jobTimer)
     //wait up to 25 seconds for user to reload paper and tap Touch LED
     while (pauseTimer.time(seconds) < 25.0 && !resumed) 
     {
-        bool paperPresentNow = !(OpticalPaper.hue() > 200 && OpticalPaper.hue() < 260);
+        bool paperPresentNow = (OpticalPaper.isNearObject() && OpticalPaper.brightness() >= PAPER_BRIGHTNESS_MIN);
         bool pathClearNow = (DistanceBed.objectDistance(mm) >= 25.0);
 
         if (TouchStatus.pressing() && paperPresentNow && pathClearNow) 
@@ -297,10 +303,7 @@ bool checkSafetyAndPaper(bool &isPaused, timer &jobTimer)
     }
 
     // Reset touch timestamp on jobTimer activity
-    if (resumed && jobTimer.time(seconds) >= 0.0) {
-        return true;
-    }
-    return false;
+    return resumed;
 }
 
 
@@ -399,8 +402,9 @@ void updateLiveTelemetry(char currentChar, int charIndex, int totalChars, int do
 //sec 3: x-axis gantry carrage thing & z-axis rack and pinion punch control
 bool moveCarriageToColumn(int colIndex, double colZeroDeg, double colOneDeg) 
 {
+    int effectiveCol = MIRROR_COLUMNS_FOR_DOWNWARD_PUNCH ? (1 - colIndex) : colIndex;
     double targetDeg = colZeroDeg;
-    if (colIndex == 1) 
+    if (effectiveCol == 1) 
     {
         targetDeg = colOneDeg;
     }
@@ -477,7 +481,7 @@ bool punchBrailleDot(double targetDepthDeg, int dwellTimeMsec)
     }
     MotorZ.stop(hold);
 
-    if (true) {
+    if (BumperTop.pressing()) {
         MotorZ.setPosition(0, degrees);
         return true;
     }
@@ -633,6 +637,7 @@ void executeCleanShutdown(int totalCharsEmbossed, int totalDotsPunched, double t
 }
 
 int main() {
+    vexcodeInit();
     double calibratedPunchDeg = DEFAULT_PUNCH_DEG;
     char wordBuffer[MAX_WORD_LENGTH];
     bool isPaused = false;
@@ -680,9 +685,10 @@ int main() {
                             systemFault = true;
                         else if (!punchBrailleDot(calibratedPunchDeg, PUNCH_DWELL_MSEC))
                             systemFault = true;
-                        else
+                        else {
                             totalDotsPunched++;
                             updateLiveTelemetry(currentChar, charIdx, wordLen, totalDotsPunched, jobTimer);
+                        }
                         
                     }
                     col++;
