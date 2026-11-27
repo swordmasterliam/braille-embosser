@@ -97,7 +97,7 @@ void vexcodeInit() {
 
 /*
  * MTE 100 / MTE 121 Design Project - Group 28
- * Automated Desktop Braille Embosser Control Firmware (v16 - Stall Punch)
+ * Automated Desktop Braille Embosser Control Firmware (v17 - Stall Punch)
  *
  * Team Members:
  *   - Joseph Lu         : homeAllAxes, checkSafetyAndPaper
@@ -165,9 +165,10 @@ const double Z_MAX_DOWN_TRAVEL    = 90.0;  // Safety cap during stall punch
 const double POS_TOLERANCE_DEG    = 0.5;   // Tight X/Y precision window
 const double STALL_CURRENT_AMP    = 1.25;  // X/Y/Z-lift stall current
 const double X_HOMING_STALL_AMP   = 1.40;  // Sustained X end-stop current
-const double Z_PUNCH_STALL_AMP    = 1.45;  // Downward punch stall current
+const double Z_PUNCH_STALL_AMP    = 1.85;  // Max downward stall current
 const double OBSTRUCTION_MIN_MM   = 25.0;  // Minimum safe bed clearance
-const int    PUNCH_DWELL_MSEC     = 350;   // Hold-at-bottom dwell (ms)
+const int    PUNCH_SQUEEZE_MSEC   = 150;   // Active bottom squeeze (ms)
+const int    PUNCH_DWELL_MSEC     = 250;   // Hold-at-bottom dwell (ms)
 const int    Z_POST_LIFT_PAUSE_MS = 450;   // Pause at top before X (3x)
 const int    MAX_WORD_LENGTH      = 16;    // Max queued chars per job
 const bool   MIRROR_COLUMNS_FOR_DOWNWARD_PUNCH = false;
@@ -232,7 +233,7 @@ bool homeAllAxes(double &calibratedPressDeg, double &paperThreshold) {
 
     Brain.Screen.clearScreen();
     Brain.Screen.setCursor(1, 1);
-    Brain.Screen.print("v16 Lift Z ~1cm");
+    Brain.Screen.print("v17 Lift Z ~1cm");
 
     // 1. Start with stylus resting at the bottom; zero encoder cleanly
     // without jamming downward, then lift strictly +18 deg (~1 cm) BEFORE
@@ -258,7 +259,7 @@ bool homeAllAxes(double &calibratedPressDeg, double &paperThreshold) {
     // 2. With Z raised ~1 cm, home X-axis carriage ALL THE WAY to the
     // motor-side physical stop using sustained stall (180 ms continuous).
     Brain.Screen.newLine();
-    Brain.Screen.print("v16 Homing X...");
+    Brain.Screen.print("v17 Homing X...");
     homingTimer.clear();
     MotorX.spin(forward, 30, percent);
     int stallCount = 0;
@@ -303,7 +304,7 @@ bool homeAllAxes(double &calibratedPressDeg, double &paperThreshold) {
     TouchStatus.on(blue);
     Brain.Screen.clearScreen();
     Brain.Screen.setCursor(1, 1);
-    Brain.Screen.print("v16 Ready!");
+    Brain.Screen.print("v17 Ready!");
     Brain.Screen.newLine();
     Brain.Screen.print("Z:+%.0f B:%.0f%%",
                        MotorZ.position(degrees), startBright);
@@ -627,20 +628,20 @@ bool moveCarriageToColumn(int charIdx, int dotCol, double colZeroDeg,
     return !stalled;
 }
 
-// Function 6: Pushes the Z-axis stylus SLOWLY down at full 100% torque
-// until physical stall (current >= 1.45 A or sustained vel < 2 rpm, safety
-// capped at maxDownTravelDeg), holds firmly at bottom during dwellTimeMsec,
-// then lifts strictly +Z_LIFT_DEG (+18 deg = ~1 cm) above actual bottomPos
-// and pauses 450 ms AT THE TOP before X moves sideways.
+// Function 6: Pushes the Z-axis stylus firmly down at 100% max torque
+// until strong stall (current >= 1.85 A or 160 ms sustained zero velocity,
+// safety capped at maxDownTravelDeg), applies a 150 ms active bottom
+// squeeze + 250 ms hold dwell, then lifts strictly +Z_LIFT_DEG (+18 deg)
+// above actual bottomPos and pauses 450 ms AT THE TOP before X moves.
 bool punchBrailleDot(double maxDownTravelDeg, int dwellTimeMsec) {
     timer strokeTimer;
     strokeTimer.clear();
 
     double topPos = MotorZ.position(degrees);
 
-    // Slow, high-force downward embossing stroke until firm bottom stall.
+    // Firm, full-torque downward embossing stroke until strong stall.
     MotorZ.setMaxTorque(100, percent);
-    MotorZ.spin(reverse, 25, percent);
+    MotorZ.spin(reverse, 35, percent);
     int zStallCount = 0;
     bool bottomStalled = false;
     while ((topPos - MotorZ.position(degrees)) < maxDownTravelDeg &&
@@ -650,7 +651,7 @@ bool punchBrailleDot(double maxDownTravelDeg, int dwellTimeMsec) {
                 bottomStalled = true;
             } else if (fabs(MotorZ.velocity(rpm)) < 2.0) {
                 zStallCount++;
-                if (zStallCount >= 16) {
+                if (zStallCount >= 32) {
                     bottomStalled = true;
                 }
             } else {
@@ -659,18 +660,24 @@ bool punchBrailleDot(double maxDownTravelDeg, int dwellTimeMsec) {
         }
         wait(5, msec);
     }
+
+    // Brief 150 ms active downward squeeze at full torque, then hold
+    // firmly at the bottom for dwellTimeMsec to form a deeper tactile dot.
+    MotorZ.spin(reverse, 20, percent);
+    timer dwellTimer;
+    dwellTimer.clear();
+    while (dwellTimer.time(msec) < PUNCH_SQUEEZE_MSEC) {
+        wait(5, msec);
+    }
     MotorZ.stop(hold);
 
-    // Hold full 100% torque at bottom without driving motor further so
-    // paper forms a crisp bump and gear teeth never slip on the rack.
-    timer dwellTimer;
     dwellTimer.clear();
     while (dwellTimer.time(msec) < dwellTimeMsec) {
         wait(5, msec);
     }
 
-    // Measure actual physical bottom angle and lift STRICTLY +18 deg
-    // (~1 cm) above it so the stylus can NEVER creep higher dot-to-dot.
+    // Measure actual physical bottom angle AFTER squeeze/dwell and lift
+    // STRICTLY +18 deg (~1 cm) above it so lift height never creeps up.
     double bottomPos = MotorZ.position(degrees);
     double liftTarget = bottomPos + Z_LIFT_DEG;
 
@@ -776,18 +783,20 @@ void executeCleanShutdown(int totalCharsEmbossed, int totalDotsPunched,
     timer shutdownTimer;
     shutdownTimer.clear();
 
-    // Z is already held ~1 cm above paper unless FAULT_Z_LIFT occurred;
-    // only perform a relative +18 deg lift if Z failed to clear.
+    // At job end, raise Z to 2x normal lift height (+36 deg total = ~2 cm)
+    // before ejecting paper and parking X (already at 1x unless Z faulted).
+    double extraLiftDeg = Z_LIFT_DEG;
     if (faultCode == FAULT_Z_LIFT) {
-        double liftTarget = MotorZ.position(degrees) + Z_LIFT_DEG;
-        MotorZ.setMaxTorque(70, percent);
-        MotorZ.spin(forward, 20, percent);
-        while (MotorZ.position(degrees) < liftTarget &&
-               shutdownTimer.time(msec) < 1500 &&
-               (shutdownTimer.time(msec) < 150 ||
-                MotorZ.current(amp) < STALL_CURRENT_AMP)) {
-            wait(10, msec);
-        }
+        extraLiftDeg = 2.0 * Z_LIFT_DEG;
+    }
+    double endLiftTarget = MotorZ.position(degrees) + extraLiftDeg;
+    MotorZ.setMaxTorque(70, percent);
+    MotorZ.spin(forward, 20, percent);
+    while (MotorZ.position(degrees) < endLiftTarget &&
+           shutdownTimer.time(msec) < 2000 &&
+           (shutdownTimer.time(msec) < 150 ||
+            MotorZ.current(amp) < STALL_CURRENT_AMP)) {
+        wait(10, msec);
     }
     MotorZ.stop(hold);
     MotorZ.setMaxTorque(100, percent);
