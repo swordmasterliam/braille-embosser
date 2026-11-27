@@ -299,16 +299,18 @@ bool checkSafetyAndPaper(bool &isPaused, timer &jobTimer,
         }
     }
 
-    // Check calibrated brightness threshold (or blue/red dark backing card
-    // fallback if sensor sits too high to return nonzero brightness).
+    // Check calibrated brightness threshold; if sensor sits too far to
+    // read brightness at startup (paperThreshold == 0), only pause when a
+    // contrasting blue/green dark card is placed right under the sensor
+    // (never false-trigger on idle hue = 0 / red).
     double optBright = OpticalPaper.brightness();
     bool paperMissing = false;
     if (paperThreshold > 0.0) {
         paperMissing = (optBright < paperThreshold);
-    } else {
+    } else if (OpticalPaper.isNearObject()) {
         color seenCol = OpticalPaper.color();
         paperMissing = (seenCol == colorType::blue ||
-                        seenCol == colorType::red);
+                        seenCol == colorType::green);
     }
 
     double bedClearanceMm = DistanceBed.objectDistance(mm);
@@ -352,10 +354,10 @@ bool checkSafetyAndPaper(bool &isPaused, timer &jobTimer,
         bool paperPresentNow = true;
         if (paperThreshold > 0.0) {
             paperPresentNow = (OpticalPaper.brightness() >= paperThreshold);
-        } else {
+        } else if (OpticalPaper.isNearObject()) {
             color nowCol = OpticalPaper.color();
             paperPresentNow = (nowCol != colorType::blue &&
-                               nowCol != colorType::red);
+                               nowCol != colorType::green);
         }
 
         double currentClearance = DistanceBed.objectDistance(mm);
