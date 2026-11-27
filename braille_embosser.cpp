@@ -27,7 +27,7 @@ brain Brain;
 inertial BrainInertial = inertial();
 motor MotorFeed = motor(PORT9, true);
 motor MotorX = motor(PORT10, false);
-motor MotorZ = motor(PORT7, false);
+motor MotorZ = motor(PORT7, true);
 optical OpticalPaper = optical(PORT12);
 distance DistanceBed = distance(PORT8);
 touchled TouchStatus = touchled(PORT11);
@@ -97,7 +97,7 @@ void vexcodeInit() {
 
 /*
  * MTE 100 / MTE 121 Design Project - Group 28
- * Automated Desktop Braille Embosser Control Firmware (v15 - Stall Punch)
+ * Automated Desktop Braille Embosser Control Firmware (v16 - Stall Punch)
  *
  * Team Members:
  *   - Joseph Lu         : homeAllAxes, checkSafetyAndPaper
@@ -232,7 +232,7 @@ bool homeAllAxes(double &calibratedPressDeg, double &paperThreshold) {
 
     Brain.Screen.clearScreen();
     Brain.Screen.setCursor(1, 1);
-    Brain.Screen.print("v15 Lift Z ~1cm");
+    Brain.Screen.print("v16 Lift Z ~1cm");
 
     // 1. Start with stylus resting at the bottom; zero encoder cleanly
     // without jamming downward, then lift strictly +18 deg (~1 cm) BEFORE
@@ -258,7 +258,7 @@ bool homeAllAxes(double &calibratedPressDeg, double &paperThreshold) {
     // 2. With Z raised ~1 cm, home X-axis carriage ALL THE WAY to the
     // motor-side physical stop using sustained stall (180 ms continuous).
     Brain.Screen.newLine();
-    Brain.Screen.print("v15 Homing X...");
+    Brain.Screen.print("v16 Homing X...");
     homingTimer.clear();
     MotorX.spin(forward, 30, percent);
     int stallCount = 0;
@@ -303,7 +303,7 @@ bool homeAllAxes(double &calibratedPressDeg, double &paperThreshold) {
     TouchStatus.on(blue);
     Brain.Screen.clearScreen();
     Brain.Screen.setCursor(1, 1);
-    Brain.Screen.print("v15 Ready!");
+    Brain.Screen.print("v16 Ready!");
     Brain.Screen.newLine();
     Brain.Screen.print("Z:+%.0f B:%.0f%%",
                        MotorZ.position(degrees), startBright);
