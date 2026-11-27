@@ -25,12 +25,12 @@ brain Brain;
 
 // Robot configuration code.
 inertial BrainInertial = inertial();
-motor MotorFeed = motor(PORT1, false);
-motor MotorX = motor(PORT2, false);
-motor MotorZ = motor(PORT3, false);
-optical OpticalPaper = optical(PORT5);
-distance DistanceBed = distance(PORT6);
-touchled TouchStatus = touchled(PORT8);
+motor MotorFeed = motor(PORT9, false);
+motor MotorX = motor(PORT10, false);
+motor MotorZ = motor(PORT7, false);
+optical OpticalPaper = optical(PORT8);
+distance DistanceBed = distance(PORT12);
+touchled TouchStatus = touchled(PORT11);
 controller Controller = controller();
 
 // generating and setting random seed
@@ -108,15 +108,15 @@ void vexcodeInit() {
  *
  * Mechanical Configuration (Final Revision - Tetrix Prime):
  *   - Row-by-row horizontal embossing across the word (Row 0 -> 1 -> 2)
- *   - PORT1 (MotorFeed)   : Single Y-axis roller axle (2x 200 mm VEX IQ
- *                           travel wheels); active hold secures paper
- *   - PORT2 (MotorX)      : 16T VEX IQ sprocket (6.35 mm pitch chain,
- *                           101.6 mm/rev) driving bearing carriage
- *   - PORT3 (MotorZ)      : 60T blue spur gear & vertical rack stylus into
- *                           3D-printed BrailleBasePlate (pre-made indents)
- *   - PORT5 (OpticalPaper): Paper presence / brightness sensor
- *   - PORT6 (DistanceBed) : Bed height calibration & obstruction interlock
- *   - PORT8 (TouchStatus) : User Start/Pause input & RGB status indicator
+ *   - PORT9  (MotorFeed)   : Single Y-axis roller axle (2x 200 mm VEX IQ
+ *                            travel wheels); active hold secures paper
+ *   - PORT10 (MotorX)      : 16T VEX IQ sprocket (6.35 mm pitch chain,
+ *                            101.6 mm/rev) driving bearing carriage
+ *   - PORT7  (MotorZ)      : 60T blue spur gear & vertical rack stylus into
+ *                            3D-printed BrailleBasePlate (pre-made indents)
+ *   - PORT8  (OpticalPaper): Paper presence / brightness sensor (Colour)
+ *   - PORT12 (DistanceBed) : Bed height calibration & obstruction interlock
+ *   - PORT11 (TouchStatus) : User Start/Pause input & RGB status indicator
  */
 
 #include <cmath>
