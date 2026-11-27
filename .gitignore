@@ -1,7 +1,16 @@
-# Project specific ignores
-Software_Architecture_and_Attribution.md
-
-# OS files
+# OS & editor artifacts
 .DS_Store
 Thumbs.db
 Desktop.ini
+desktop.ini
+
+# SolidWorks & Office temp lock files
+~$*
+*.tmp
+*.bak
+
+# Build artifacts
+build/
+*.o
+*.bin
+*.elf
