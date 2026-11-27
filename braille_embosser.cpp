@@ -1,5 +1,5 @@
 #pragma region VEXcode Generated Robot Configuration
-// Standard VEXcode IQ C++ headers.
+// Make sure all required headers are included.
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
@@ -10,7 +10,7 @@
 
 using namespace vex;
 
-// Default VEX IQ Brain instance.
+// Brain should be defined by default
 brain Brain;
 
 // START IQ MACROS
@@ -23,9 +23,17 @@ brain Brain;
   for (int iterator = 0; iterator < iterations; iterator++)
 // END IQ MACROS
 
+// Robot configuration code.
 inertial BrainInertial = inertial();
+motor MotorFeed = motor(PORT1, false);
+motor MotorX = motor(PORT2, false);
+motor MotorZ = motor(PORT3, false);
+optical OpticalPaper = optical(PORT5);
+distance DistanceBed = distance(PORT6);
+touchled TouchStatus = touchled(PORT8);
+controller Controller = controller();
 
-// Generates and sets the random seed using inertial accelerometer data.
+// generating and setting random seed
 void initializeRandomSeed() {
   wait(100, msec);
   double xAxis = BrainInertial.acceleration(xaxis) * 1000;
@@ -35,7 +43,7 @@ void initializeRandomSeed() {
   srand(seed);
 }
 
-// Converts a VEX color object to a readable C-string.
+// Converts a color to a string
 const char* convertColorToString(color col) {
   if (col == colorType::red) return "red";
   else if (col == colorType::green) return "green";
@@ -58,7 +66,7 @@ const char* convertColorToString(color col) {
   else return "unknown";
 }
 
-// Converts a VEX colorType enum value to a readable C-string.
+// Convert colorType to string
 const char* convertColorToString(colorType col) {
   if (col == colorType::red) return "red";
   else if (col == colorType::green) return "green";
@@ -86,16 +94,6 @@ void vexcodeInit() {
 }
 
 #pragma endregion VEXcode Generated Robot Configuration
-
-// Hardware port declarations kept OUTSIDE the VEXcode #pragma region so
-// VEXcode IQ never deletes them when opening or saving the project.
-motor MotorFeed = motor(PORT1, false);
-motor MotorX = motor(PORT2, false);
-motor MotorZ = motor(PORT3, false);
-optical OpticalPaper = optical(PORT5);
-distance DistanceBed = distance(PORT6);
-touchled TouchStatus = touchled(PORT8);
-controller Controller = controller();
 
 /*
  * MTE 100 / MTE 121 Design Project - Group 28
@@ -216,42 +214,36 @@ bool homeAllAxes(double &calibratedPunchDeg) {
     timer homingTimer;
     homingTimer.clear();
 
-    if (TouchStatus.installed()) {
-        TouchStatus.on(yellow);
-    }
-    if (OpticalPaper.installed()) {
-        OpticalPaper.setLight(ledState::on);
-    }
+    TouchStatus.on(yellow);
+    OpticalPaper.setLight(ledState::on);
 
     Brain.Screen.clearScreen();
     Brain.Screen.setCursor(1, 1);
-    Brain.Screen.print("Homing Axes...");
+    Brain.Screen.print("Homing Z-Axis...");
 
     // Retract Z-axis stylus upward to upper mechanical stop via current
     // stall sensing after a 150 ms motor inrush mask (2500 ms max).
-    if (MotorZ.installed()) {
-        MotorZ.spin(forward, 20, percent);
-        while (homingTimer.time(msec) < 2500 &&
-               (homingTimer.time(msec) < 150 ||
-                MotorZ.current(amp) < HOMING_STALL_AMP)) {
-            wait(10, msec);
-        }
-        MotorZ.stop(hold);
-        MotorZ.setPosition(0, degrees);
+    MotorZ.spin(forward, 20, percent);
+    while (homingTimer.time(msec) < 2500 &&
+           (homingTimer.time(msec) < 150 ||
+            MotorZ.current(amp) < HOMING_STALL_AMP)) {
+        wait(10, msec);
     }
+    MotorZ.stop(hold);
+    MotorZ.setPosition(0, degrees);
 
     // Home X-axis bearing carriage to left end-stop via VEX chain drive.
-    if (MotorX.installed()) {
-        homingTimer.clear();
-        MotorX.spin(forward, 12, percent);
-        while (homingTimer.time(msec) < 4000 &&
-               (homingTimer.time(msec) < 150 ||
-                MotorX.current(amp) < HOMING_STALL_AMP)) {
-            wait(10, msec);
-        }
-        MotorX.stop(brake);
-        MotorX.setPosition(0, degrees);
+    Brain.Screen.newLine();
+    Brain.Screen.print("Homing X-Axis...");
+    homingTimer.clear();
+    MotorX.spin(forward, 12, percent);
+    while (homingTimer.time(msec) < 4000 &&
+           (homingTimer.time(msec) < 150 ||
+            MotorX.current(amp) < HOMING_STALL_AMP)) {
+        wait(10, msec);
     }
+    MotorX.stop(brake);
+    MotorX.setPosition(0, degrees);
 
     // Leave single Y-axis roller axle (PORT1) in coast for easy loading.
     MotorFeed.stop(coast);
@@ -259,34 +251,30 @@ bool homeAllAxes(double &calibratedPunchDeg) {
 
     // Verify embossing zone is unobstructed and calibrate Z punch stroke.
     calibratedPunchDeg = DEFAULT_PUNCH_DEG;
-    if (DistanceBed.installed()) {
-        double measuredBedDist = DistanceBed.objectDistance(mm);
-        if (measuredBedDist > 0.0 &&
-            measuredBedDist < OBSTRUCTION_MIN_MM) {
-            if (TouchStatus.installed()) {
-                TouchStatus.on(red);
-            }
-            Brain.Screen.newLine();
-            Brain.Screen.print("Fault: Bed Obstructed");
-            return false;
-        }
+    double measuredBedDist = DistanceBed.objectDistance(mm);
+    if (measuredBedDist > 0.0 && measuredBedDist < OBSTRUCTION_MIN_MM) {
+        TouchStatus.on(red);
+        Brain.Screen.newLine();
+        Brain.Screen.print("Fault: Bed < 25mm");
+        wait(1000, msec);
+        return false;
+    }
 
-        if (measuredBedDist >= 35.0 && measuredBedDist <= 95.0) {
-            calibratedPunchDeg =
-                DEFAULT_PUNCH_DEG + (measuredBedDist - 60.0) * 1.4;
-            if (calibratedPunchDeg < MIN_PUNCH_DEG) {
-                calibratedPunchDeg = MIN_PUNCH_DEG;
-            } else if (calibratedPunchDeg > MAX_PUNCH_DEG) {
-                calibratedPunchDeg = MAX_PUNCH_DEG;
-            }
+    if (measuredBedDist >= 35.0 && measuredBedDist <= 95.0) {
+        calibratedPunchDeg =
+            DEFAULT_PUNCH_DEG + (measuredBedDist - 60.0) * 1.4;
+        if (calibratedPunchDeg < MIN_PUNCH_DEG) {
+            calibratedPunchDeg = MIN_PUNCH_DEG;
+        } else if (calibratedPunchDeg > MAX_PUNCH_DEG) {
+            calibratedPunchDeg = MAX_PUNCH_DEG;
         }
     }
 
-    if (TouchStatus.installed()) {
-        TouchStatus.on(blue);
-    }
+    TouchStatus.on(blue);
     Brain.Screen.newLine();
-    Brain.Screen.print("Homing Complete.");
+    Brain.Screen.print("Homed! D:%.0fmm Z:%.0f",
+                       measuredBedDist, calibratedPunchDeg);
+    wait(900, msec);
     return true;
 }
 
@@ -294,26 +282,20 @@ bool homeAllAxes(double &calibratedPunchDeg) {
 // and DistanceBed (obstruction < 25 mm). Halts all 3 motors safely on a
 // trigger and waits up to 25 s for recovery and TouchStatus confirmation.
 bool checkSafetyAndPaper(bool &isPaused, timer &jobTimer) {
-    if (TouchStatus.installed() && TouchStatus.pressing()) {
+    if (TouchStatus.pressing()) {
         isPaused = true;
         while (TouchStatus.pressing()) {
             wait(15, msec);
         }
     }
 
-    bool paperMissing = false;
-    if (OpticalPaper.installed()) {
-        paperMissing =
-            (!OpticalPaper.isNearObject() ||
-             OpticalPaper.brightness() < PAPER_BRIGHTNESS_MIN);
-    }
+    double optBright = OpticalPaper.brightness();
+    bool paperMissing =
+        (!OpticalPaper.isNearObject() || optBright < PAPER_BRIGHTNESS_MIN);
 
-    bool obstructionDetected = false;
-    if (DistanceBed.installed()) {
-        double bedClearanceMm = DistanceBed.objectDistance(mm);
-        obstructionDetected =
-            (bedClearanceMm > 0.0 && bedClearanceMm < OBSTRUCTION_MIN_MM);
-    }
+    double bedClearanceMm = DistanceBed.objectDistance(mm);
+    bool obstructionDetected =
+        (bedClearanceMm > 0.0 && bedClearanceMm < OBSTRUCTION_MIN_MM);
 
     if (paperMissing || obstructionDetected) {
         isPaused = true;
@@ -327,9 +309,7 @@ bool checkSafetyAndPaper(bool &isPaused, timer &jobTimer) {
     MotorX.stop(brake);
     MotorFeed.stop(hold);
     MotorZ.stop(hold);
-    if (TouchStatus.installed()) {
-        TouchStatus.on(yellow);
-    }
+    TouchStatus.on(yellow);
 
     Brain.Screen.clearScreen();
     Brain.Screen.setCursor(1, 1);
@@ -342,44 +322,35 @@ bool checkSafetyAndPaper(bool &isPaused, timer &jobTimer) {
     }
 
     Brain.Screen.newLine();
-    Brain.Screen.print("Load paper & tap LED");
+    Brain.Screen.print("B:%.0f%% D:%.0fmm", optBright, bedClearanceMm);
     Brain.Screen.newLine();
-    Brain.Screen.print("Job Time: %.1fs", jobTimer.time(seconds));
+    Brain.Screen.print("Tap LED/Check Resume");
 
     timer pauseTimer;
     pauseTimer.clear();
     bool resumed = false;
 
     while (pauseTimer.time(seconds) < 25.0 && !resumed) {
-        bool paperPresentNow = true;
-        if (OpticalPaper.installed()) {
-            paperPresentNow =
-                (OpticalPaper.isNearObject() &&
-                 OpticalPaper.brightness() >= PAPER_BRIGHTNESS_MIN);
-        }
+        bool paperPresentNow =
+            (OpticalPaper.isNearObject() &&
+             OpticalPaper.brightness() >= PAPER_BRIGHTNESS_MIN);
 
-        bool pathClearNow = true;
-        if (DistanceBed.installed()) {
-            double currentClearance = DistanceBed.objectDistance(mm);
-            pathClearNow =
-                (currentClearance <= 0.0 ||
-                 currentClearance >= OBSTRUCTION_MIN_MM);
-        }
+        double currentClearance = DistanceBed.objectDistance(mm);
+        bool pathClearNow =
+            (currentClearance <= 0.0 ||
+             currentClearance >= OBSTRUCTION_MIN_MM);
 
         bool resumePressed =
-            (TouchStatus.installed() && TouchStatus.pressing()) ||
-            Brain.buttonCheck.pressing();
+            TouchStatus.pressing() || Brain.buttonCheck.pressing();
 
         if (resumePressed && paperPresentNow && pathClearNow) {
-            while ((TouchStatus.installed() && TouchStatus.pressing()) ||
+            while (TouchStatus.pressing() ||
                    Brain.buttonCheck.pressing()) {
                 wait(15, msec);
             }
             isPaused = false;
             resumed = true;
-            if (TouchStatus.installed()) {
-                TouchStatus.on(green);
-            }
+            TouchStatus.on(green);
         }
         wait(25, msec);
     }
@@ -401,9 +372,7 @@ int selectWordFromController(char wordBuffer[], int maxLen) {
     int currentLetterIdx = 0; // 0 = 'A' .. 25 = 'Z', 26 = ' '
     bool selectionComplete = false;
 
-    if (TouchStatus.installed()) {
-        TouchStatus.on(blue);
-    }
+    TouchStatus.on(blue);
     timer inputTimeout;
     inputTimeout.clear();
 
@@ -463,12 +432,12 @@ int selectWordFromController(char wordBuffer[], int maxLen) {
 
         // Confirm queued word via TouchStatus, Brain Down, or FDown.
         bool startTriggered =
-            (TouchStatus.installed() && TouchStatus.pressing()) ||
+            TouchStatus.pressing() ||
             Brain.buttonDown.pressing() ||
             Controller.ButtonFDown.pressing();
 
         if (startTriggered) {
-            while ((TouchStatus.installed() && TouchStatus.pressing()) ||
+            while (TouchStatus.pressing() ||
                    Brain.buttonDown.pressing() ||
                    Controller.ButtonFDown.pressing()) {
                 wait(15, msec);
@@ -675,7 +644,7 @@ bool getCharDotMatrix(char letter, bool cellMatrix[3][2]) {
 // steps to avoid overshoot and 25% on long ejection moves. Locks in hold
 // mode during punching when holdAfterFeed is true, or coasts when false.
 bool advancePaperStrip(double feedDegrees, bool holdAfterFeed) {
-    if (feedDegrees > 0.0 && MotorFeed.installed()) {
+    if (feedDegrees > 0.0) {
         double targetY = MotorFeed.position(degrees) + feedDegrees;
         int feedSpeed = 10;
         if (feedDegrees > 45.0) {
@@ -716,16 +685,14 @@ void executeCleanShutdown(int totalCharsEmbossed, int totalDotsPunched,
     shutdownTimer.clear();
 
     // Ensure Z-axis stylus is fully lifted before moving paper or X.
-    if (MotorZ.installed()) {
-        MotorZ.spin(forward, 25, percent);
-        while (-MotorZ.position(degrees) > Z_HOME_TOLERANCE_DEG &&
-               shutdownTimer.time(msec) < 2000 &&
-               (shutdownTimer.time(msec) < 150 ||
-                MotorZ.current(amp) < HOMING_STALL_AMP)) {
-            wait(10, msec);
-        }
-        MotorZ.stop(brake);
+    MotorZ.spin(forward, 25, percent);
+    while (-MotorZ.position(degrees) > Z_HOME_TOLERANCE_DEG &&
+           shutdownTimer.time(msec) < 2000 &&
+           (shutdownTimer.time(msec) < 150 ||
+            MotorZ.current(amp) < HOMING_STALL_AMP)) {
+        wait(10, msec);
     }
+    MotorZ.stop(brake);
 
     // Eject finished Braille strip on normal completion; release on fault.
     if (!faultOccurred) {
@@ -735,31 +702,23 @@ void executeCleanShutdown(int totalCharsEmbossed, int totalDotsPunched,
     }
 
     // Park X-axis carriage at left home position.
-    if (MotorX.installed()) {
-        moveCarriageToColumn(0, 0.0, COL_STEP_DEG);
-    }
+    moveCarriageToColumn(0, 0.0, COL_STEP_DEG);
 
     // De-energize all 3 motors and optical LED for safe handling.
     MotorFeed.stop(coast);
     MotorX.stop(coast);
     MotorZ.stop(coast);
-    if (OpticalPaper.installed()) {
-        OpticalPaper.setLight(ledState::off);
-    }
+    OpticalPaper.setLight(ledState::off);
 
     // Display final summary and audio/visual completion cue.
     Brain.Screen.clearScreen();
     Brain.Screen.setCursor(1, 1);
     if (faultOccurred) {
-        if (TouchStatus.installed()) {
-            TouchStatus.on(red);
-        }
+        TouchStatus.on(red);
         Brain.playSound(siren);
         Brain.Screen.print("SHUTDOWN: FAULT HALT");
     } else {
-        if (TouchStatus.installed()) {
-            TouchStatus.on(blue);
-        }
+        TouchStatus.on(blue);
         Brain.playSound(tada);
         Brain.Screen.print("JOB COMPLETE - EJECTED");
     }
@@ -806,9 +765,7 @@ int main() {
 
     timer jobTimer;
     jobTimer.clear();
-    if (TouchStatus.installed()) {
-        TouchStatus.on(green);
-    }
+    TouchStatus.on(green);
 
     // Lock single feed roller in hold mode (and feed lead-in if set).
     if (!advancePaperStrip(LOAD_FEED_DEG, true)) {
