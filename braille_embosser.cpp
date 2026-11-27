@@ -97,7 +97,7 @@ void vexcodeInit() {
 
 /*
  * MTE 100 / MTE 121 Design Project - Group 28
- * Automated Desktop Braille Embosser Control Firmware (v20 - Paper Gate)
+ * Automated Desktop Braille Embosser Control Firmware (v21 - Auto Sensors)
  *
  * Team Members:
  *   - Joseph Lu         : homeAllAxes, checkSafetyAndPaper
@@ -108,14 +108,16 @@ void vexcodeInit() {
  *
  * Mechanical Configuration (Final Revision - Tetrix Prime):
  *   - Row-by-row horizontal embossing across the word (Row 0 -> 1 -> 2)
- *   - Relative Z stroke: start at bottom, lift ONLY ~1 cm (+18 deg) before
- *     X homes to motor side, press down slowly, lift strictly +18 deg up
+ *   - Relative Z stroke: start at bottom, lift ~1 cm (+18 deg) before X
+ *     homes to motor side, stall-punch down, lift strictly +18 deg up
+ *   - Auto-detects Gen 1 (colorsensor/sonar) AND Gen 2 (optical/distance)
+ *     across all 12 Brain ports so both sensor generations work reliably.
  *   - PORT9  (MotorFeed)   : Single Y-axis roller axle (2x 200 mm wheels)
  *   - PORT10 (MotorX)      : 16T VEX IQ sprocket + 6.35 mm chain
  *   - PORT7  (MotorZ)      : Spur gear + vertical rack stylus into
  *                            3D-printed BrailleBasePlate indents (dia 2.5)
- *   - PORT12 (OpticalPaper): Paper presence / brightness sensor (higher)
- *   - PORT8  (DistanceBed) : Obstruction safety interlock (lower)
+ *   - PORT12 (Color/Opt)   : Paper presence / brightness sensor (higher)
+ *   - PORT8  (Sonar/Dist)  : Obstruction safety interlock (lower)
  *   - PORT11 (TouchStatus) : User Start/Pause input & RGB status LED
  */
 
@@ -167,9 +169,9 @@ const double STALL_CURRENT_AMP    = 1.25;  // Y/Z-lift stall current
 const double X_JAM_CURRENT_AMP    = 1.65;  // Sustained X jam fault current
 const double X_HOMING_STALL_AMP   = 1.40;  // Sustained X end-stop current
 const double Z_PUNCH_STALL_AMP    = 1.85;  // Max downward stall current
-const double OBSTRUCTION_MIN_MM   = 80.0;  // Default obstruction range (mm)
-const double WHITE_PAPER_MIN_PCT  = 18.0;  // Min optical brightness (%)
-const double STARTUP_BLOCK_MM     = 20.0;  // Startup blocked limit (mm)
+const double OBSTRUCTION_MIN_MM   = 80.0;  // Default Gen2 obstruction (mm)
+const double SONAR_MIN_MM         = 100.0; // Default Gen1 sonar range (mm)
+const double WHITE_PAPER_MIN_PCT  = 15.0;  // Min white-paper brightness (%)
 const int    PUNCH_SQUEEZE_MSEC   = 150;   // Active bottom squeeze (ms)
 const int    PUNCH_DWELL_MSEC     = 250;   // Hold-at-bottom dwell (ms)
 const int    Z_POST_LIFT_PAUSE_MS = 450;   // Pause at top before X (3x)
@@ -220,24 +222,61 @@ const bool BRAILLE_ALPHABET[26][3][2] = {
 // Author: Joseph Lu
 // =========================================================================
 
+// Helper: reads reflected brightness (0-100%) from either Gen 1
+// colorsensor (colorGen == 1) or Gen 2 optical (colorGen == 2).
+double readPaperBrightness(int colorGen, colorsensor &colorG1,
+                           optical &opticalG2) {
+    if (colorGen == 1) {
+        return (double)colorG1.brightness();
+    } else if (colorGen == 2) {
+        return opticalG2.brightness();
+    }
+    return 0.0;
+}
+
+// Helper: reads bed distance (mm) and detected flag from either Gen 1
+// ultrasonic sonar (distGen == 1) or Gen 2 laser distance (distGen == 2).
+double readBedDistance(int distGen, sonar &sonarG1, distance &distG2,
+                       bool &objectFound) {
+    if (distGen == 1) {
+        objectFound = sonarG1.foundObject();
+        return sonarG1.distance(mm);
+    } else if (distGen == 2) {
+        objectFound = distG2.isObjectDetected();
+        return distG2.objectDistance(mm);
+    }
+    objectFound = false;
+    return 0.0;
+}
+
 // Function 1: Zeroes Z at the bottom start position, lifts Z strictly
 // ~1 cm (+18 deg) and pauses 450 ms BEFORE homing X all the way to the
-// motor-side stop via sustained-stall detection, auto-calibrates both
-// DistanceBed and OpticalPaper thresholds, and prints live readings.
+// motor-side stop via sustained-stall detection, enables the white LED on
+// Gen 1 or Gen 2 color/optical sensor, auto-calibrates sensor thresholds,
+// and prints the exact detected port + generation on the Brain LCD.
 bool homeAllAxes(double &calibratedPressDeg, double &paperThreshold,
-                 double &distThreshold) {
+                 double &distThreshold, int colorPort, int colorGen,
+                 colorsensor &colorG1, optical &opticalG2, int distPort,
+                 int distGen, sonar &sonarG1, distance &distG2) {
     timer homingTimer;
     homingTimer.clear();
 
     MotorZ.setMaxTorque(100, percent);
     MotorX.setMaxTorque(100, percent);
     TouchStatus.on(yellow);
-    OpticalPaper.setLight(ledState::on);
-    OpticalPaper.setLightPower(100, percent);
+
+    // Enable integrated white LED on whichever generation is connected.
+    if (colorGen == 1) {
+        colorG1.setLight(ledState::on);
+        colorG1.setLight(100, percent);
+    } else if (colorGen == 2) {
+        opticalG2.setLight(ledState::on);
+        opticalG2.setLightPower(100, percent);
+    }
 
     Brain.Screen.clearScreen();
     Brain.Screen.setCursor(1, 1);
-    Brain.Screen.print("v20 Lift Z ~1cm");
+    Brain.Screen.print("v21 Lift Z ~1cm");
 
     // 1. Start with stylus resting at the bottom; zero encoder cleanly
     // without jamming downward, then lift strictly +18 deg (~1 cm) BEFORE
@@ -263,7 +302,7 @@ bool homeAllAxes(double &calibratedPressDeg, double &paperThreshold,
     // 2. With Z raised ~1 cm, home X-axis carriage ALL THE WAY to the
     // motor-side physical stop using sustained stall (180 ms continuous).
     Brain.Screen.newLine();
-    Brain.Screen.print("v20 Homing X...");
+    Brain.Screen.print("v21 Homing X...");
     homingTimer.clear();
     MotorX.spin(forward, 30, percent);
     int stallCount = 0;
@@ -286,50 +325,66 @@ bool homeAllAxes(double &calibratedPressDeg, double &paperThreshold,
     MotorFeed.stop(coast);
     MotorFeed.setPosition(0, degrees);
 
-    // 3. Auto-calibrate DistanceBed threshold from clear-bed baseline
-    // (never fatal-abort at startup; runtime checkSafetyAndPaper pauses).
-    wait(100, msec);
-    bool startDistDetected = DistanceBed.isObjectDetected();
-    double measuredBedDist = DistanceBed.objectDistance(mm);
+    // 3. Auto-calibrate Distance/Sonar threshold from clear-bed baseline.
+    wait(150, msec);
+    bool startDistDetected = false;
+    double measuredBedDist =
+        readBedDistance(distGen, sonarG1, distG2, startDistDetected);
 
-    distThreshold = OBSTRUCTION_MIN_MM;
-    if (startDistDetected && measuredBedDist > 50.0 &&
-        measuredBedDist < 1800.0) {
-        distThreshold = measuredBedDist * 0.65;
-        if (distThreshold < 40.0) {
-            distThreshold = 40.0;
-        } else if (distThreshold > 100.0) {
-            distThreshold = 100.0;
+    if (distGen == 1) {
+        distThreshold = SONAR_MIN_MM;
+        if (startDistDetected && measuredBedDist > 80.0 &&
+            measuredBedDist < 900.0) {
+            distThreshold = measuredBedDist * 0.65;
+            if (distThreshold < 60.0) {
+                distThreshold = 60.0;
+            } else if (distThreshold > 140.0) {
+                distThreshold = 140.0;
+            }
+        }
+    } else {
+        distThreshold = OBSTRUCTION_MIN_MM;
+        if (startDistDetected && measuredBedDist > 50.0 &&
+            measuredBedDist < 1800.0) {
+            distThreshold = measuredBedDist * 0.65;
+            if (distThreshold < 40.0) {
+                distThreshold = 40.0;
+            } else if (distThreshold > 100.0) {
+                distThreshold = 100.0;
+            }
         }
     }
 
-    // 4. Calibrate OpticalPaper white-paper threshold. NEVER disable to 0:
-    // require at least WHITE_PAPER_MIN_PCT (18%) so the robot always
-    // pauses when no white paper is present (or black paper covers it).
-    double startBright = OpticalPaper.brightness();
+    // 4. Calibrate white-paper brightness threshold (never disable to 0
+    // when a color/optical sensor is connected).
+    double startBright = readPaperBrightness(colorGen, colorG1, opticalG2);
     paperThreshold = WHITE_PAPER_MIN_PCT;
-    if (startBright >= 35.0) {
+    if (startBright >= 30.0) {
         paperThreshold = startBright * 0.55;
     }
 
     TouchStatus.on(blue);
     Brain.Screen.clearScreen();
     Brain.Screen.setCursor(1, 1);
-    Brain.Screen.print("v20 Ready Z:+%.0f", MotorZ.position(degrees));
+    Brain.Screen.print("v21 C:P%dG%d D:P%dG%d",
+                       colorPort + 1, colorGen, distPort + 1, distGen);
     Brain.Screen.newLine();
     Brain.Screen.print("B:%.0f%% T:%.0f%%", startBright, paperThreshold);
     Brain.Screen.newLine();
     Brain.Screen.print("D:%.0f T:%.0fmm", measuredBedDist, distThreshold);
-    wait(1800, msec);
+    wait(2200, msec);
     return true;
 }
 
-// Function 2: Polls TouchStatus (manual pause), OpticalPaper (requires
-// white paper >= paperThreshold), and DistanceBed (< distThreshold).
-// Called before every dot slot; halts all 3 motors safely on trigger,
-// updates live B/D readings while paused, and waits up to 25 s to resume.
+// Function 2: Polls TouchStatus (manual pause), Color/Optical sensor
+// (requires white paper >= paperThreshold when detected), and Sonar/
+// Distance sensor (< distThreshold). Updates live B/D readings while
+// paused and waits up to 25 s for recovery + Touch LED (or Check skip).
 bool checkSafetyAndPaper(bool &isPaused, timer &jobTimer,
-                         double paperThreshold, double distThreshold) {
+                         double paperThreshold, double distThreshold,
+                         int colorGen, colorsensor &colorG1,
+                         optical &opticalG2, int distGen, sonar &sonarG1,
+                         distance &distG2) {
     if (TouchStatus.pressing()) {
         isPaused = true;
         while (TouchStatus.pressing()) {
@@ -337,13 +392,14 @@ bool checkSafetyAndPaper(bool &isPaused, timer &jobTimer,
         }
     }
 
-    double optBright = OpticalPaper.brightness();
-    bool paperMissing = (optBright < paperThreshold);
+    double optBright = readPaperBrightness(colorGen, colorG1, opticalG2);
+    bool paperMissing = (colorGen > 0 && optBright < paperThreshold);
 
-    bool distObj = DistanceBed.isObjectDetected();
-    double bedClearanceMm = DistanceBed.objectDistance(mm);
+    bool distObj = false;
+    double bedClearanceMm =
+        readBedDistance(distGen, sonarG1, distG2, distObj);
     bool obstructionDetected =
-        (distObj && bedClearanceMm < distThreshold);
+        (distGen > 0 && distObj && bedClearanceMm < distThreshold);
 
     if (paperMissing || obstructionDetected) {
         isPaused = true;
@@ -377,15 +433,19 @@ bool checkSafetyAndPaper(bool &isPaused, timer &jobTimer,
     int uiTicks = 0;
 
     while (pauseTimer.time(seconds) < 25.0 && !resumed) {
-        double nowBright = OpticalPaper.brightness();
-        bool paperPresentNow = (nowBright >= paperThreshold);
+        double nowBright =
+            readPaperBrightness(colorGen, colorG1, opticalG2);
+        bool paperPresentNow =
+            (colorGen == 0 || nowBright >= paperThreshold);
 
-        bool nowDistObj = DistanceBed.isObjectDetected();
-        double currentClearance = DistanceBed.objectDistance(mm);
+        bool nowDistObj = false;
+        double currentClearance =
+            readBedDistance(distGen, sonarG1, distG2, nowDistObj);
         bool pathClearNow =
-            (!nowDistObj || currentClearance >= distThreshold);
+            (distGen == 0 || !nowDistObj ||
+             currentClearance >= distThreshold);
 
-        // Refresh live Optical & Distance readings every ~200 ms.
+        // Refresh live Color/Optical & Distance readings every ~200 ms.
         if (uiTicks % 8 == 0) {
             Brain.Screen.setCursor(2, 1);
             Brain.Screen.print("B:%.0f/%.0f D:%.0f  ",
@@ -513,18 +573,23 @@ int selectWordFromController(char wordBuffer[], int maxLen) {
 }
 
 // Function 4: Updates the VEX IQ Brain LCD with the active character,
-// active Braille row (1-3), dots punched, live sensor readings (Optical
-// brightness % and Distance mm), and elapsed time (<= 16 chars/line).
+// active Braille row (1-3), dots punched, live sensor readings (Color/
+// Optical brightness % and Sonar/Distance mm), and elapsed time.
 void updateLiveTelemetry(char currentChar, int rowIndex, int totalRows,
-                         int dotsPunched, timer &jobTimer) {
+                         int dotsPunched, timer &jobTimer, int colorGen,
+                         colorsensor &colorG1, optical &opticalG2,
+                         int distGen, sonar &sonarG1, distance &distG2) {
+    bool unusedFound = false;
+    double liveBright = readPaperBrightness(colorGen, colorG1, opticalG2);
+    double liveDist =
+        readBedDistance(distGen, sonarG1, distG2, unusedFound);
+
     Brain.Screen.clearScreen();
     Brain.Screen.setCursor(1, 1);
     Brain.Screen.print("R%d/%d '%c' D:%d",
                        rowIndex + 1, totalRows, currentChar, dotsPunched);
     Brain.Screen.newLine();
-    Brain.Screen.print("B:%.0f%% D:%.0fmm",
-                       OpticalPaper.brightness(),
-                       DistanceBed.objectDistance(mm));
+    Brain.Screen.print("B:%.0f%% D:%.0fmm", liveBright, liveDist);
     Brain.Screen.newLine();
     Brain.Screen.print("Time: %.1fs", jobTimer.time(seconds));
 }
@@ -794,12 +859,14 @@ bool advancePaperStrip(double feedDegrees, bool holdAfterFeed) {
     return true;
 }
 
-// Function 9: Executes a safe non-abort shutdown. Holds Z at +Z_LIFT_DEG
-// clearance, ejects the completed strip via MotorFeed (unless faulted),
-// parks X-axis at 0 deg, sets all 3 motors to coast, displays job stats
-// (and specific fault cause if faultCode != 0), and calls programStop().
+// Function 9: Executes a safe non-abort shutdown. Raises Z to 2x clearance
+// (+36 deg total), ejects the completed strip via MotorFeed (unless
+// faulted), parks X-axis at 0 deg, de-energizes motors and sensor LED,
+// displays job stats (or specific fault cause), and calls programStop().
 void executeCleanShutdown(int totalCharsEmbossed, int totalDotsPunched,
-                          double totalTimeSec, int faultCode) {
+                          double totalTimeSec, int faultCode,
+                          int colorGen, colorsensor &colorG1,
+                          optical &opticalG2) {
     timer shutdownTimer;
     shutdownTimer.clear();
 
@@ -833,11 +900,15 @@ void executeCleanShutdown(int totalCharsEmbossed, int totalDotsPunched,
     moveCarriageToColumn(-1, 0, COL_ZERO_DEG,
                          INTRA_COL_DEG, CHAR_PITCH_DEG);
 
-    // De-energize all 3 motors and optical LED for safe handling.
+    // De-energize all 3 motors and color/optical LED for safe handling.
     MotorFeed.stop(coast);
     MotorX.stop(coast);
     MotorZ.stop(coast);
-    OpticalPaper.setLight(ledState::off);
+    if (colorGen == 1) {
+        colorG1.setLight(ledState::off);
+    } else if (colorGen == 2) {
+        opticalG2.setLight(ledState::off);
+    }
 
     // Display final summary (<= 16 chars/line) and audio/visual cue.
     Brain.Screen.clearScreen();
@@ -846,7 +917,7 @@ void executeCleanShutdown(int totalCharsEmbossed, int totalDotsPunched,
         TouchStatus.on(red);
         Brain.playSound(siren);
         if (faultCode == FAULT_BED_BLOCKED) {
-            Brain.Screen.print("FAULT:Bed<25mm");
+            Brain.Screen.print("FAULT:Bed<20mm");
         } else if (faultCode == FAULT_SAFETY_TIMEOUT) {
             Brain.Screen.print("FAULT:Safety");
         } else if (faultCode == FAULT_X_STALL) {
@@ -878,8 +949,38 @@ void executeCleanShutdown(int totalCharsEmbossed, int totalDotsPunched,
 int main() {
     vexcodeInit();
 
+    // Auto-detect exact physical port and generation (Gen 1 vs Gen 2) for
+    // Color/Optical and Sonar/Distance across all 12 Brain smart ports.
+    int colorPort = PORT12;
+    int colorGen = 0; // 1 = Gen 1 colorsensor, 2 = Gen 2 optical
+    int distPort = PORT8;
+    int distGen = 0;  // 1 = Gen 1 sonar, 2 = Gen 2 distance
+    for (int p = PORT1; p <= PORT12; p++) {
+        IQ_DeviceType dt = vexDeviceTypeGetByIndex(p);
+        if (dt == kDeviceTypeRgbSensor) {
+            colorPort = p;
+            colorGen = 1;
+        } else if (dt == kDeviceTypeOpticalSensor) {
+            colorPort = p;
+            colorGen = 2;
+        } else if (dt == kDeviceTypeSonarSensor) {
+            distPort = p;
+            distGen = 1;
+        } else if (dt == kDeviceTypeDistanceSensor) {
+            distPort = p;
+            distGen = 2;
+        }
+    }
+
+    // Bind only the detected sensor generation to its physical port;
+    // unused drivers bind safely to empty ports 1-4 with zero conflict.
+    colorsensor colorG1(colorGen == 1 ? colorPort : PORT1);
+    optical opticalG2(colorGen == 2 ? colorPort : PORT2);
+    sonar sonarG1(distGen == 1 ? distPort : PORT3);
+    distance distG2(distGen == 2 ? distPort : PORT4);
+
     double calibratedPressDeg = Z_MAX_DOWN_TRAVEL;
-    double paperThreshold = 0.0;
+    double paperThreshold = WHITE_PAPER_MIN_PCT;
     double distThreshold = OBSTRUCTION_MIN_MM;
     char wordBuffer[MAX_WORD_LENGTH];
     bool wordCells[MAX_WORD_LENGTH][3][2];
@@ -889,8 +990,11 @@ int main() {
     int totalDotsPunched = 0;
     int validCharCount = 0;
 
-    if (!homeAllAxes(calibratedPressDeg, paperThreshold, distThreshold)) {
-        executeCleanShutdown(0, 0, 0.0, FAULT_BED_BLOCKED);
+    if (!homeAllAxes(calibratedPressDeg, paperThreshold, distThreshold,
+                     colorPort, colorGen, colorG1, opticalG2, distPort,
+                     distGen, sonarG1, distG2)) {
+        executeCleanShutdown(0, 0, 0.0, FAULT_BED_BLOCKED,
+                             colorGen, colorG1, opticalG2);
         return 0;
     }
 
@@ -918,8 +1022,9 @@ int main() {
     // reversal backlash between dots and matches BrailleBasePlate spacing.
     int row = 0;
     while (row < 3 && faultCode == FAULT_NONE) {
-        if (!checkSafetyAndPaper(isPaused, jobTimer,
-                                 paperThreshold, distThreshold)) {
+        if (!checkSafetyAndPaper(isPaused, jobTimer, paperThreshold,
+                                 distThreshold, colorGen, colorG1,
+                                 opticalG2, distGen, sonarG1, distG2)) {
             faultCode = FAULT_SAFETY_TIMEOUT;
         }
 
@@ -929,8 +1034,9 @@ int main() {
                 int col = 0;
                 while (col < 2 && faultCode == FAULT_NONE) {
                     if (!checkSafetyAndPaper(isPaused, jobTimer,
-                                             paperThreshold,
-                                             distThreshold)) {
+                                             paperThreshold, distThreshold,
+                                             colorGen, colorG1, opticalG2,
+                                             distGen, sonarG1, distG2)) {
                         faultCode = FAULT_SAFETY_TIMEOUT;
                     } else {
                         int effectiveCol = col;
@@ -954,7 +1060,10 @@ int main() {
                                 updateLiveTelemetry(wordBuffer[charIdx],
                                                     row, 3,
                                                     totalDotsPunched,
-                                                    jobTimer);
+                                                    jobTimer, colorGen,
+                                                    colorG1, opticalG2,
+                                                    distGen, sonarG1,
+                                                    distG2);
                             }
                         } else {
                             wait(100, msec);
@@ -969,8 +1078,10 @@ int main() {
         // After finishing a full horizontal row, return X left and step
         // paper forward by 1 Braille dot row (3.5 mm) for the next row.
         if (faultCode == FAULT_NONE && row < 2) {
-            if (!checkSafetyAndPaper(isPaused, jobTimer,
-                                     paperThreshold, distThreshold)) {
+            if (!checkSafetyAndPaper(isPaused, jobTimer, paperThreshold,
+                                     distThreshold, colorGen, colorG1,
+                                     opticalG2, distGen, sonarG1,
+                                     distG2)) {
                 faultCode = FAULT_SAFETY_TIMEOUT;
             } else if (!moveCarriageToColumn(-1, 0, COL_ZERO_DEG,
                                              INTRA_COL_DEG,
@@ -989,6 +1100,7 @@ int main() {
     }
 
     executeCleanShutdown(charsCompleted, totalDotsPunched,
-                         jobTimer.time(seconds), faultCode);
+                         jobTimer.time(seconds), faultCode,
+                         colorGen, colorG1, opticalG2);
     return 0;
 }
