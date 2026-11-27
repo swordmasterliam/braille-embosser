@@ -97,7 +97,7 @@ void vexcodeInit() {
 
 /*
  * MTE 100 / MTE 121 Design Project - Group 28
- * Automated Desktop Braille Embosser Control Firmware (v9 - Row-by-Row)
+ * Automated Desktop Braille Embosser Control Firmware (v10 - Bottom-Zero Z)
  *
  * Team Members:
  *   - Joseph Lu         : homeAllAxes, checkSafetyAndPaper
@@ -108,10 +108,12 @@ void vexcodeInit() {
  *
  * Mechanical Configuration (Final Revision - Tetrix Prime):
  *   - Row-by-row horizontal embossing across the word (Row 0 -> 1 -> 2)
+ *   - Bottom-zero Z homing: start with stylus ALL THE WAY DOWN (0 deg),
+ *     lift only Z_LIFT_DEG (+20 deg) to clear paper below rack top
  *   - PORT9  (MotorFeed)   : Single Y-axis roller axle (2x 200 mm wheels)
  *   - PORT10 (MotorX)      : 16T VEX IQ sprocket + 6.35 mm chain
- *   - PORT7  (MotorZ)      : 60T blue spur gear + vertical rack stylus
- *                            into 3D-printed BrailleBasePlate indents
+ *   - PORT7  (MotorZ)      : Spur gear + vertical rack stylus into
+ *                            3D-printed BrailleBasePlate indents (dia 2.5)
  *   - PORT12 (OpticalPaper): Paper presence / brightness sensor (higher)
  *   - PORT8  (DistanceBed) : Obstruction safety interlock (lower)
  *   - PORT11 (TouchStatus) : User Start/Pause input & RGB status LED
@@ -122,15 +124,16 @@ void vexcodeInit() {
 // =========================================================================
 // Physical Geometry & Calibration Constants (read-only; no mutable globals)
 // =========================================================================
-// TUNE THESE VALUES FIRST ON THE PHYSICAL ROBOT:
-//   1. COL_ZERO_MM     : Ruler distance (mm) from X home stop to Hole 0
-//   2. DOT_PITCH_MM    : Center-to-center hole pitch (2.5 mm Braille grid;
-//                        set to 25.0 if your plate is 2.5 cm spacing)
-//   3. CHAR_STEP_HOLES : Grid holes from Letter i Col 0 to Letter i+1 Col 0
-//                        (3 holes = 2 dot cols + 1 blank gap hole = 7.5 mm)
-const double DOT_PITCH_MM         = 2.5;   // Center-to-center pitch (mm)
-const double COL_ZERO_MM          = 10.0;  // X home stop -> Hole 0 (mm)
-const int    CHAR_STEP_HOLES      = 3;     // Grid holes per character cell
+// Measured BrailleBasePlate geometry (mm, dia 2.5 mm holes):
+//   - Left edge to Letter 0 Col 0 center  : 2.5 mm
+//   - Col 0 to Col 1 within one letter    : 3.5 mm
+//   - Col 1 of letter i to Col 0 of i+1   : 5.5 mm (char pitch = 9.0 mm)
+//   - Vertical row step (Row 0 -> 1 -> 2) : 3.5 mm
+const double COL_ZERO_MM          = 2.5;   // X home stop -> Hole 0 (mm)
+const double INTRA_COL_MM         = 3.5;   // Col 0 -> Col 1 in cell (mm)
+const double INTER_CHAR_GAP_MM    = 5.5;   // Col 1 -> next Col 0 (mm)
+const double CHAR_PITCH_MM        = INTRA_COL_MM + INTER_CHAR_GAP_MM;
+const double ROW_PITCH_MM         = 3.5;   // Vertical Braille row step (mm)
 const double LOAD_FEED_MM         = 0.0;   // Startup feed-in (mm)
 const double EJECT_FEED_MM        = 120.0; // Final label ejection (mm)
 
@@ -141,32 +144,40 @@ const double X_MM_PER_REV         = 101.6;
 const double Y_MM_PER_REV         = 200.0;
 
 // Derived encoder angle targets (degrees):
-//   At 2.5 mm pitch: X hole step = 8.86 deg, Y row step = 4.50 deg
+//   X: COL_ZERO = 8.86 deg, INTRA_COL = 12.40 deg, CHAR_PITCH = 31.89 deg
+//   Y: ROW_FEED = 6.30 deg (3.5 mm)
 const double COL_ZERO_DEG         = (COL_ZERO_MM / X_MM_PER_REV) * 360.0;
-const double COL_STEP_DEG         = (DOT_PITCH_MM / X_MM_PER_REV) * 360.0;
+const double INTRA_COL_DEG        = (INTRA_COL_MM / X_MM_PER_REV) * 360.0;
+const double CHAR_PITCH_DEG       = (CHAR_PITCH_MM / X_MM_PER_REV) * 360.0;
 const double LOAD_FEED_DEG        = (LOAD_FEED_MM / Y_MM_PER_REV) * 360.0;
-const double ROW_FEED_DEG         = (DOT_PITCH_MM / Y_MM_PER_REV) * 360.0;
+const double ROW_FEED_DEG         = (ROW_PITCH_MM / Y_MM_PER_REV) * 360.0;
 const double EJECT_FEED_DEG       = (EJECT_FEED_MM / Y_MM_PER_REV) * 360.0;
 
 // Anti-backlash approach overshoot when returning left on VEX chain (deg).
 const double X_BACKLASH_DEG       = 8.0;
 
-// Z-axis auto-probe and punch parameters (spur gear + vertical rack).
-// Startup calibration probes downward into Hole 0 until contact, then
-// adds Z_INDENT_EXTRA_DEG for firm embossing into the 3D-printed die.
-const double DEFAULT_PUNCH_DEG    = 110.0; // Fallback Z stroke (deg)
-const double MIN_PUNCH_DEG        = 15.0;  // Minimum valid Z probe (deg)
-const double MAX_PUNCH_DEG        = 240.0; // Maximum probe/punch travel
-const double Z_INDENT_EXTRA_DEG   = 10.0;  // Extra press past contact
-const double Z_LIFT_TARGET_DEG    = 0.0;   // Target angle after dot lift
+// Z-axis bottom-zero parameters (start with stylus ALL THE WAY DOWN):
+//   0 deg         = bottom contact on paper / base plate indent
+//   +Z_LIFT_DEG   = short upward clearance lift (stays well off rack top)
+//   -Z_PRESS_DEG  = gentle extra downward press past 0 to form crisp dot
+const double Z_LIFT_DEG           = 20.0;  // Upward clearance lift (deg)
+const double Z_MIN_CLEAR_DEG      = 8.0;   // Minimum lift to clear paper
+const double Z_PRESS_OVERDRIVE    = 6.0;   // Firm press past bottom 0 (deg)
 const double POS_TOLERANCE_DEG    = 0.5;   // Tight X/Y precision window
-const double Z_HOME_TOLERANCE_DEG = 5.0;   // Safe top-lift window
 const double STALL_CURRENT_AMP    = 1.25;  // Active jam/seating current
-const double HOMING_STALL_AMP     = 0.85;  // Touch-probe / homing current
+const double HOMING_STALL_AMP     = 0.85;  // Gentle bottom-snug current
 const double OBSTRUCTION_MIN_MM   = 25.0;  // Minimum safe bed clearance
 const int    PUNCH_DWELL_MSEC     = 350;   // Dwell time to form dot (ms)
 const int    MAX_WORD_LENGTH      = 16;    // Max queued chars per job
 const bool   MIRROR_COLUMNS_FOR_DOWNWARD_PUNCH = false;
+
+// Fault code constants for diagnostic display on shutdown.
+const int FAULT_NONE              = 0;
+const int FAULT_BED_BLOCKED       = 1;
+const int FAULT_SAFETY_TIMEOUT    = 2;
+const int FAULT_X_STALL           = 3;
+const int FAULT_Z_LIFT            = 4;
+const int FAULT_Y_JAM             = 5;
 
 // Standard Grade 1 Unified English Braille lookup table (A-Z).
 // Dimensions: [26 letters][3 dot rows][2 dot columns].
@@ -199,22 +210,16 @@ const bool BRAILLE_ALPHABET[26][3][2] = {
     {{true,  false}, {false, true},  {true,  true}}   // Z
 };
 
-// Forward declaration so homeAllAxes can position X over Hole 0 before
-// probing Z downward to measure the exact paper/die contact depth.
-bool moveCarriageToColumn(int gridCol, double colZeroDeg,
-                          double colStepDeg);
-
 // =========================================================================
 // Section 1: System Homing, Calibration, and Safety Monitoring
 // Author: Joseph Lu
 // =========================================================================
 
-// Function 1: Snugs Z upward (start raised to max), homes X to the left
-// physical end-stop via velocity + current sensing, moves X over Hole 0,
-// probes Z downward until the stylus contacts the paper/die to measure
-// calibratedPunchDeg automatically, lifts Z back to 0 deg, checks bed
-// clearance, and auto-calibrates the OpticalPaper brightness baseline.
-bool homeAllAxes(double &calibratedPunchDeg, double &paperThreshold) {
+// Function 1: Bottom-zero Z calibration (start with stylus ALL THE WAY
+// DOWN), lifts Z by only Z_LIFT_DEG (+20 deg) to clear paper without ever
+// reaching the rack top prongs, homes X all the way to the left stop,
+// checks DistanceBed clearance, and calibrates OpticalPaper brightness.
+bool homeAllAxes(double &calibratedPressDeg, double &paperThreshold) {
     timer homingTimer;
     homingTimer.clear();
 
@@ -224,22 +229,38 @@ bool homeAllAxes(double &calibratedPunchDeg, double &paperThreshold) {
 
     Brain.Screen.clearScreen();
     Brain.Screen.setCursor(1, 1);
-    Brain.Screen.print("v9 Homing Z...");
+    Brain.Screen.print("v10 Zeroing Z...");
 
-    // 1. Gently snug Z upward (start with pusher raised to max) using a
-    // short 400 ms guard so the vertical rack cannot run off the 60T gear.
-    MotorZ.spin(forward, 15, percent);
-    while (homingTimer.time(msec) < 400 &&
-           (homingTimer.time(msec) < 150 ||
+    // 1. Gently snug Z downward (start with stylus all the way down) and
+    // define 0.0 deg as exact paper / base plate bottom contact.
+    MotorZ.spin(reverse, 15, percent);
+    while (homingTimer.time(msec) < 250 &&
+           (homingTimer.time(msec) < 100 ||
             MotorZ.current(amp) < HOMING_STALL_AMP)) {
         wait(10, msec);
     }
     MotorZ.stop(hold);
     MotorZ.setPosition(0, degrees);
+    calibratedPressDeg = Z_PRESS_OVERDRIVE;
 
-    // 2. Home X-axis carriage ALL THE WAY to the left physical edge.
+    // 2. Lift Z upward by only Z_LIFT_DEG (+20 deg) so the stylus clears
+    // the paper cleanly before X moves and never reaches the top prongs.
     Brain.Screen.newLine();
-    Brain.Screen.print("v9 Homing X...");
+    Brain.Screen.print("v10 Lift Z +20..");
+    homingTimer.clear();
+    MotorZ.spin(forward, 20, percent);
+    while (MotorZ.position(degrees) < Z_LIFT_DEG &&
+           homingTimer.time(msec) < 1200 &&
+           (homingTimer.time(msec) < 150 ||
+            MotorZ.current(amp) < STALL_CURRENT_AMP)) {
+        wait(5, msec);
+    }
+    MotorZ.stop(hold);
+    wait(40, msec);
+
+    // 3. Home X-axis carriage ALL THE WAY to the left physical edge.
+    Brain.Screen.newLine();
+    Brain.Screen.print("v10 Homing X...");
     homingTimer.clear();
     MotorX.spin(forward, 22, percent);
     while (homingTimer.time(msec) < 6000 &&
@@ -255,54 +276,16 @@ bool homeAllAxes(double &calibratedPunchDeg, double &paperThreshold) {
     MotorFeed.stop(coast);
     MotorFeed.setPosition(0, degrees);
 
-    // 3. Check DistanceBed for startup obstruction before probing Z.
+    // 4. Check DistanceBed for startup obstruction (< 25 mm).
     double measuredBedDist = DistanceBed.objectDistance(mm);
     if (measuredBedDist > 0.0 && measuredBedDist < OBSTRUCTION_MIN_MM) {
         TouchStatus.on(red);
-        Brain.Screen.newLine();
+        Brain.Screen.clearScreen();
+        Brain.Screen.setCursor(1, 1);
         Brain.Screen.print("Fault:Bed<25mm");
         wait(1000, msec);
         return false;
     }
-
-    // 4. Move X over Hole 0 and probe Z downward until firm contact with
-    // the paper / 3D-printed base indent so punch depth is always exact.
-    Brain.Screen.newLine();
-    Brain.Screen.print("v9 Probing Z...");
-    moveCarriageToColumn(0, COL_ZERO_DEG, COL_STEP_DEG);
-
-    homingTimer.clear();
-    MotorZ.spin(reverse, 25, percent);
-    while (-MotorZ.position(degrees) < MAX_PUNCH_DEG &&
-           homingTimer.time(msec) < 3500 &&
-           (homingTimer.time(msec) < 150 ||
-            (fabs(MotorZ.velocity(rpm)) > 2.0 &&
-             MotorZ.current(amp) < HOMING_STALL_AMP))) {
-        wait(10, msec);
-    }
-    MotorZ.stop(hold);
-
-    double probedDeg = -MotorZ.position(degrees);
-    if (probedDeg >= MIN_PUNCH_DEG) {
-        calibratedPunchDeg = probedDeg + Z_INDENT_EXTRA_DEG;
-        if (calibratedPunchDeg > MAX_PUNCH_DEG) {
-            calibratedPunchDeg = MAX_PUNCH_DEG;
-        }
-    } else {
-        calibratedPunchDeg = DEFAULT_PUNCH_DEG;
-    }
-
-    // Lift Z cleanly back up to top home (0 deg) after probing.
-    homingTimer.clear();
-    MotorZ.spin(forward, 30, percent);
-    while (-MotorZ.position(degrees) > Z_HOME_TOLERANCE_DEG &&
-           homingTimer.time(msec) < 2500 &&
-           (homingTimer.time(msec) < 150 ||
-            MotorZ.current(amp) < HOMING_STALL_AMP)) {
-        wait(10, msec);
-    }
-    MotorZ.stop(hold);
-    MotorZ.setPosition(0, degrees);
 
     // 5. Auto-calibrate OpticalPaper brightness from loaded paper.
     wait(100, msec);
@@ -316,13 +299,13 @@ bool homeAllAxes(double &calibratedPunchDeg, double &paperThreshold) {
     TouchStatus.on(blue);
     Brain.Screen.clearScreen();
     Brain.Screen.setCursor(1, 1);
-    Brain.Screen.print("v9 Ready!");
+    Brain.Screen.print("v10 Ready!");
     Brain.Screen.newLine();
-    Brain.Screen.print("Z:%.0f B:%.0f%%",
-                       calibratedPunchDeg, startBright);
+    Brain.Screen.print("Z:+%.0f B:%.0f%%",
+                       MotorZ.position(degrees), startBright);
     Brain.Screen.newLine();
     Brain.Screen.print("Dist: %.0fmm", measuredBedDist);
-    wait(1000, msec);
+    wait(900, msec);
     return true;
 }
 
@@ -545,13 +528,16 @@ void updateLiveTelemetry(char currentChar, int rowIndex, int totalRows,
 // =========================================================================
 
 // Function 5: Positions the bearing-guided X-axis carriage over any
-// horizontal grid hole (gridCol = 0, 1, 3, 4, ...) along the 2.5 mm
-// BrailleBasePlate via the 16T VEX sprocket within 0.5 deg. Uses
-// single-direction anti-backlash approach when returning left; treats
-// end-stop contact during return-to-0 as clean re-homing rather than fault.
-bool moveCarriageToColumn(int gridCol, double colZeroDeg,
-                          double colStepDeg) {
-    double targetDeg = colZeroDeg + (gridCol * colStepDeg);
+// (charIdx, dotCol) hole on BrailleBasePlate (2.5 mm offset, 3.5 mm intra-
+// cell spacing, 5.5 mm inter-cell gap -> 9.0 mm char pitch) via the 16T
+// sprocket. Pass charIdx < 0 to re-home cleanly to 0 deg between rows.
+bool moveCarriageToColumn(int charIdx, int dotCol, double colZeroDeg,
+                          double intraColDeg, double charPitchDeg) {
+    double targetDeg = 0.0;
+    if (charIdx >= 0) {
+        targetDeg =
+            colZeroDeg + (charIdx * charPitchDeg) + (dotCol * intraColDeg);
+    }
     if (targetDeg < 0.0) {
         targetDeg = 0.0;
     }
@@ -563,11 +549,11 @@ bool moveCarriageToColumn(int gridCol, double colZeroDeg,
     double maxMoveMs = 2500.0 + fabs(targetDeg - currentDeg) * 20.0;
 
     // Special case: returning to home (0 deg) between rows or on shutdown.
-    if (targetDeg <= 0.5) {
-        MotorX.spin(forward, 18, percent);
+    if (charIdx < 0 || targetDeg <= 0.5) {
+        MotorX.spin(forward, 20, percent);
         while (-MotorX.position(degrees) > POS_TOLERANCE_DEG &&
                moveTimer.time(msec) < maxMoveMs &&
-               (moveTimer.time(msec) < 250 ||
+               (moveTimer.time(msec) < 300 ||
                 (fabs(MotorX.velocity(rpm)) > 2.0 &&
                  MotorX.current(amp) < STALL_CURRENT_AMP))) {
             wait(10, msec);
@@ -585,14 +571,14 @@ bool moveCarriageToColumn(int gridCol, double colZeroDeg,
         if (preTarget < 0.0) {
             preTarget = 0.0;
         }
-        int leftSpeed = 10;
-        if (currentDeg - preTarget > 25.0) {
-            leftSpeed = 16;
+        int leftSpeed = 20;
+        if (currentDeg - preTarget > 30.0) {
+            leftSpeed = 24;
         }
         MotorX.spin(forward, leftSpeed, percent);
         while (-MotorX.position(degrees) > preTarget + POS_TOLERANCE_DEG &&
                !stalled) {
-            if ((moveTimer.time(msec) > 250 &&
+            if ((moveTimer.time(msec) > 350 &&
                  fabs(MotorX.velocity(rpm)) < 1.5 &&
                  MotorX.current(amp) > STALL_CURRENT_AMP) ||
                 moveTimer.time(msec) > maxMoveMs) {
@@ -608,14 +594,14 @@ bool moveCarriageToColumn(int gridCol, double colZeroDeg,
 
     // Final approach moving right (reverse spin) into the exact hole.
     if (!stalled && targetDeg > currentDeg + POS_TOLERANCE_DEG) {
-        int rightSpeed = 10;
-        if (targetDeg - currentDeg > 25.0) {
-            rightSpeed = 16;
+        int rightSpeed = 20;
+        if (targetDeg - currentDeg > 30.0) {
+            rightSpeed = 24;
         }
         MotorX.spin(reverse, rightSpeed, percent);
         while (-MotorX.position(degrees) < targetDeg - POS_TOLERANCE_DEG &&
                !stalled) {
-            if ((moveTimer.time(msec) > 250 &&
+            if ((moveTimer.time(msec) > 350 &&
                  fabs(MotorX.velocity(rpm)) < 1.5 &&
                  MotorX.current(amp) > STALL_CURRENT_AMP) ||
                 moveTimer.time(msec) > maxMoveMs) {
@@ -629,19 +615,19 @@ bool moveCarriageToColumn(int gridCol, double colZeroDeg,
     return !stalled;
 }
 
-// Function 6: Drives the Z-axis 60T gear and vertical rack firmly down to
-// targetDepthDeg (auto-probed during homing), dwells for dwellTimeMsec to
-// emboss a crisp bump into the 3D-printed base indent, and lifts cleanly
-// back up to Z_LIFT_TARGET_DEG (0 deg) before X moves horizontally.
-bool punchBrailleDot(double targetDepthDeg, int dwellTimeMsec) {
+// Function 6: Drives the Z-axis stylus from +Z_LIFT_DEG down to bottom
+// (0 deg minus pressOverdriveDeg, or stall current), dwells to emboss a
+// crisp dot, then lifts back up ONLY to +Z_LIFT_DEG (+20 deg) so the rack
+// clears the paper cleanly without ever catching on the top prongs.
+bool punchBrailleDot(double pressOverdriveDeg, int dwellTimeMsec) {
     timer strokeTimer;
     strokeTimer.clear();
 
     // Firm downward embossing stroke into the 3D-printed indented plate.
     MotorZ.spin(reverse, 35, percent);
-    while (-MotorZ.position(degrees) < targetDepthDeg &&
-           strokeTimer.time(msec) < 2500 &&
-           (strokeTimer.time(msec) < 200 ||
+    while (MotorZ.position(degrees) > -pressOverdriveDeg &&
+           strokeTimer.time(msec) < 1500 &&
+           (strokeTimer.time(msec) < 120 ||
             MotorZ.current(amp) < STALL_CURRENT_AMP)) {
         wait(5, msec);
     }
@@ -654,28 +640,21 @@ bool punchBrailleDot(double targetDepthDeg, int dwellTimeMsec) {
         wait(5, msec);
     }
 
-    // Lift stylus back up to Z_LIFT_TARGET_DEG (0 deg = full top lift)
-    // so it completely clears the paper before lateral carriage motion.
+    // Lift stylus up only to +Z_LIFT_DEG (+20 deg) so it clears the paper
+    // cleanly while staying safely away from the top of the rack.
     strokeTimer.clear();
-    bool hitTopStop = false;
-    MotorZ.spin(forward, 30, percent);
-    while (-MotorZ.position(degrees) >
-               Z_LIFT_TARGET_DEG + Z_HOME_TOLERANCE_DEG &&
-           strokeTimer.time(msec) < 2500 && !hitTopStop) {
-        if (strokeTimer.time(msec) > 200 &&
-            MotorZ.current(amp) >= HOMING_STALL_AMP) {
-            hitTopStop = true;
-        }
+    MotorZ.spin(forward, 25, percent);
+    while (MotorZ.position(degrees) < Z_LIFT_DEG &&
+           strokeTimer.time(msec) < 1500 &&
+           (strokeTimer.time(msec) < 150 ||
+            MotorZ.current(amp) < STALL_CURRENT_AMP)) {
         wait(5, msec);
     }
     MotorZ.stop(hold);
+    wait(40, msec);
 
-    if (hitTopStop) {
-        MotorZ.setPosition(0, degrees);
-        return true;
-    }
-    // Fail only if Z is genuinely jammed far from top clearance (> 15 deg).
-    return (-MotorZ.position(degrees) <= Z_LIFT_TARGET_DEG + 15.0);
+    // Fail only if Z genuinely failed to clear the paper (< 8 deg lift).
+    return (MotorZ.position(degrees) >= Z_MIN_CLEAR_DEG);
 }
 
 // =========================================================================
@@ -720,12 +699,12 @@ bool getCharDotMatrix(char letter, bool cellMatrix[3][2]) {
 
 // Function 8: Advances the paper strip via the single Y-axis roller axle
 // (PORT9, 2x 200 mm VEX travel wheels) by feedDegrees within 0.5 deg with
-// 250 ms inrush-masked jam detection. Uses 15% speed on short row steps
+// 250 ms inrush-masked jam detection. Uses 18% speed on short row steps
 // to overcome static friction cleanly and 25% on long ejection moves.
 bool advancePaperStrip(double feedDegrees, bool holdAfterFeed) {
     if (feedDegrees > 0.0) {
         double targetY = MotorFeed.position(degrees) + feedDegrees;
-        int feedSpeed = 15;
+        int feedSpeed = 18;
         if (feedDegrees > 45.0) {
             feedSpeed = 25;
         }
@@ -754,34 +733,37 @@ bool advancePaperStrip(double feedDegrees, bool holdAfterFeed) {
     return true;
 }
 
-// Function 9: Executes a safe non-abort shutdown. Retracts Z-axis punch,
-// ejects the completed strip via MotorFeed (unless a fault occurred),
-// parks X-axis at 0 deg, sets all 3 motors to coast, displays job stats,
-// and terminates cleanly via Brain.programStop().
+// Function 9: Executes a safe non-abort shutdown. Holds Z at +Z_LIFT_DEG
+// clearance, ejects the completed strip via MotorFeed (unless faulted),
+// parks X-axis at 0 deg, sets all 3 motors to coast, displays job stats
+// (and specific fault cause if faultCode != 0), and calls programStop().
 void executeCleanShutdown(int totalCharsEmbossed, int totalDotsPunched,
-                          double totalTimeSec, bool faultOccurred) {
+                          double totalTimeSec, int faultCode) {
     timer shutdownTimer;
     shutdownTimer.clear();
 
-    // Ensure Z-axis stylus is fully lifted before moving paper or X.
-    MotorZ.spin(forward, 30, percent);
-    while (-MotorZ.position(degrees) > Z_HOME_TOLERANCE_DEG &&
-           shutdownTimer.time(msec) < 2000 &&
-           (shutdownTimer.time(msec) < 200 ||
-            MotorZ.current(amp) < HOMING_STALL_AMP)) {
-        wait(10, msec);
+    // Ensure Z-axis stylus is lifted to +Z_LIFT_DEG before moving paper/X.
+    if (MotorZ.position(degrees) < Z_LIFT_DEG) {
+        MotorZ.spin(forward, 25, percent);
+        while (MotorZ.position(degrees) < Z_LIFT_DEG &&
+               shutdownTimer.time(msec) < 1500 &&
+               (shutdownTimer.time(msec) < 150 ||
+                MotorZ.current(amp) < STALL_CURRENT_AMP)) {
+            wait(10, msec);
+        }
     }
-    MotorZ.stop(brake);
+    MotorZ.stop(hold);
 
     // Eject finished Braille strip on normal completion; release on fault.
-    if (!faultOccurred) {
+    if (faultCode == FAULT_NONE) {
         advancePaperStrip(EJECT_FEED_DEG, false);
     } else {
         advancePaperStrip(0.0, false);
     }
 
     // Park X-axis carriage at left home position.
-    moveCarriageToColumn(0, 0.0, COL_STEP_DEG);
+    moveCarriageToColumn(-1, 0, COL_ZERO_DEG,
+                         INTRA_COL_DEG, CHAR_PITCH_DEG);
 
     // De-energize all 3 motors and optical LED for safe handling.
     MotorFeed.stop(coast);
@@ -792,10 +774,20 @@ void executeCleanShutdown(int totalCharsEmbossed, int totalDotsPunched,
     // Display final summary (<= 16 chars/line) and audio/visual cue.
     Brain.Screen.clearScreen();
     Brain.Screen.setCursor(1, 1);
-    if (faultOccurred) {
+    if (faultCode != FAULT_NONE) {
         TouchStatus.on(red);
         Brain.playSound(siren);
-        Brain.Screen.print("FAULT SHUTDOWN");
+        if (faultCode == FAULT_BED_BLOCKED) {
+            Brain.Screen.print("FAULT:Bed<25mm");
+        } else if (faultCode == FAULT_SAFETY_TIMEOUT) {
+            Brain.Screen.print("FAULT:Safety");
+        } else if (faultCode == FAULT_X_STALL) {
+            Brain.Screen.print("FAULT:X Stall");
+        } else if (faultCode == FAULT_Z_LIFT) {
+            Brain.Screen.print("FAULT:Z Lift");
+        } else {
+            Brain.Screen.print("FAULT:Y Jam");
+        }
     } else {
         TouchStatus.on(blue);
         Brain.playSound(tada);
@@ -818,18 +810,18 @@ void executeCleanShutdown(int totalCharsEmbossed, int totalDotsPunched,
 int main() {
     vexcodeInit();
 
-    double calibratedPunchDeg = DEFAULT_PUNCH_DEG;
+    double calibratedPressDeg = Z_PRESS_OVERDRIVE;
     double paperThreshold = 0.0;
     char wordBuffer[MAX_WORD_LENGTH];
     bool wordCells[MAX_WORD_LENGTH][3][2];
     bool charValid[MAX_WORD_LENGTH];
     bool isPaused = false;
-    bool systemFault = false;
+    int faultCode = FAULT_NONE;
     int totalDotsPunched = 0;
     int validCharCount = 0;
 
-    if (!homeAllAxes(calibratedPunchDeg, paperThreshold)) {
-        executeCleanShutdown(0, 0, 0.0, true);
+    if (!homeAllAxes(calibratedPressDeg, paperThreshold)) {
+        executeCleanShutdown(0, 0, 0.0, FAULT_BED_BLOCKED);
         return 0;
     }
 
@@ -849,37 +841,37 @@ int main() {
 
     // Lock single feed roller in hold mode (and feed lead-in if set).
     if (!advancePaperStrip(LOAD_FEED_DEG, true)) {
-        systemFault = true;
+        faultCode = FAULT_Y_JAM;
     }
 
     // Sweep ROW BY ROW across the entire word (Row 0 -> Row 1 -> Row 2).
     // Moving monotonically left-to-right across each row eliminates X chain
-    // reversal backlash between dots and matches the linear hole plate.
+    // reversal backlash between dots and matches BrailleBasePlate spacing.
     int row = 0;
-    while (row < 3 && !systemFault) {
+    while (row < 3 && faultCode == FAULT_NONE) {
         if (!checkSafetyAndPaper(isPaused, jobTimer, paperThreshold)) {
-            systemFault = true;
+            faultCode = FAULT_SAFETY_TIMEOUT;
         }
 
         int charIdx = 0;
-        while (charIdx < wordLen && !systemFault) {
+        while (charIdx < wordLen && faultCode == FAULT_NONE) {
             if (charValid[charIdx]) {
                 int col = 0;
-                while (col < 2 && !systemFault) {
+                while (col < 2 && faultCode == FAULT_NONE) {
                     if (wordCells[charIdx][row][col]) {
                         int effectiveCol = col;
                         if (MIRROR_COLUMNS_FOR_DOWNWARD_PUNCH) {
                             effectiveCol = 1 - col;
                         }
-                        int gridCol =
-                            charIdx * CHAR_STEP_HOLES + effectiveCol;
 
-                        if (!moveCarriageToColumn(gridCol, COL_ZERO_DEG,
-                                                  COL_STEP_DEG)) {
-                            systemFault = true;
-                        } else if (!punchBrailleDot(calibratedPunchDeg,
+                        if (!moveCarriageToColumn(charIdx, effectiveCol,
+                                                  COL_ZERO_DEG,
+                                                  INTRA_COL_DEG,
+                                                  CHAR_PITCH_DEG)) {
+                            faultCode = FAULT_X_STALL;
+                        } else if (!punchBrailleDot(calibratedPressDeg,
                                                     PUNCH_DWELL_MSEC)) {
-                            systemFault = true;
+                            faultCode = FAULT_Z_LIFT;
                         } else {
                             totalDotsPunched++;
                             updateLiveTelemetry(wordBuffer[charIdx], row,
@@ -894,23 +886,24 @@ int main() {
         }
 
         // After finishing a full horizontal row, return X left and step
-        // paper forward by 1 Braille dot row (2.5 mm) for the next row.
-        if (!systemFault && row < 2) {
-            if (!moveCarriageToColumn(0, 0.0, COL_STEP_DEG)) {
-                systemFault = true;
+        // paper forward by 1 Braille dot row (3.5 mm) for the next row.
+        if (faultCode == FAULT_NONE && row < 2) {
+            if (!moveCarriageToColumn(-1, 0, COL_ZERO_DEG,
+                                      INTRA_COL_DEG, CHAR_PITCH_DEG)) {
+                faultCode = FAULT_X_STALL;
             } else if (!advancePaperStrip(ROW_FEED_DEG, true)) {
-                systemFault = true;
+                faultCode = FAULT_Y_JAM;
             }
         }
         row++;
     }
 
     int charsCompleted = 0;
-    if (!systemFault) {
+    if (faultCode == FAULT_NONE) {
         charsCompleted = validCharCount;
     }
 
     executeCleanShutdown(charsCompleted, totalDotsPunched,
-                         jobTimer.time(seconds), systemFault);
+                         jobTimer.time(seconds), faultCode);
     return 0;
 }
