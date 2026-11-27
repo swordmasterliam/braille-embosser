@@ -99,7 +99,7 @@ controller Controller = controller();
 
 /*
  * MTE 100 / MTE 121 Design Project - Group 28
- * Automated Desktop Braille Embosser Control Firmware
+ * Automated Desktop Braille Embosser Control Firmware (Row-by-Row Mode)
  *
  * Team Members:
  *   - Joseph Lu         : homeAllAxes, checkSafetyAndPaper
@@ -109,7 +109,7 @@ controller Controller = controller();
  *                         executeCleanShutdown
  *
  * Mechanical Configuration (Final Revision - Tetrix Prime):
- *   - Tetrix Prime aluminum frame with 3D-printed bearing-guided carriage
+ *   - Row-by-row horizontal embossing across the word (Row 0 -> 1 -> 2)
  *   - PORT1 (MotorFeed)   : Single Y-axis roller axle (2x 200 mm VEX IQ
  *                           travel wheels); active hold secures paper
  *   - PORT2 (MotorX)      : 16T VEX IQ sprocket (6.35 mm pitch chain,
@@ -126,15 +126,17 @@ controller Controller = controller();
 // =========================================================================
 // Physical Geometry & Calibration Constants (read-only; no mutable globals)
 // =========================================================================
-// TUNE THESE TWO VALUES FIRST IF HOLES ARE STILL OFFSET:
-//   1. COL_ZERO_MM  : Ruler distance (mm) from X home stop to Hole 0 center
-//   2. DOT_PITCH_MM : Center-to-center hole pitch (2.5 mm standard Braille;
-//                     change to 25.0 if your 3D plate uses 2.5 cm spacing)
+// TUNE THESE VALUES FIRST ON THE PHYSICAL ROBOT:
+//   1. COL_ZERO_MM     : Ruler distance (mm) from X home stop to Hole 0
+//   2. DOT_PITCH_MM    : Center-to-center hole pitch (2.5 mm Braille grid;
+//                        set to 25.0 if your plate is 2.5 cm spacing)
+//   3. CHAR_STEP_HOLES : Grid holes from Letter i Col 0 to Letter i+1 Col 0
+//                        (3 holes = 2 dot cols + 1 blank gap hole = 7.5 mm)
 const double DOT_PITCH_MM         = 2.5;   // Center-to-center pitch (mm)
 const double COL_ZERO_MM          = 10.0;  // X home stop -> Hole 0 (mm)
-const double CHAR_GAP_MM          = 5.0;   // Inter-character Y gap (mm)
+const int    CHAR_STEP_HOLES      = 3;     // Grid holes per character cell
 const double LOAD_FEED_MM         = 0.0;   // Startup feed-in (mm)
-const double EJECT_FEED_MM        = 120.0; // Ejection travel (mm)
+const double EJECT_FEED_MM        = 120.0; // Final label ejection (mm)
 
 // Exact VEX IQ drive kinematics from physical hardware:
 //   X: 16-tooth VEX IQ sprocket (228-2500-233) * 6.35 mm chain = 101.6 mm
@@ -143,25 +145,25 @@ const double X_MM_PER_REV         = 101.6;
 const double Y_MM_PER_REV         = 200.0;
 
 // Derived encoder angle targets (degrees):
-//   At 2.5 mm pitch: X step = 8.86 deg, Y row = 4.50 deg, Y gap = 9.00 deg
+//   At 2.5 mm pitch: X hole step = 8.86 deg, Y row step = 4.50 deg
 const double COL_ZERO_DEG         = (COL_ZERO_MM / X_MM_PER_REV) * 360.0;
-const double COL_ONE_DEG          =
-    ((COL_ZERO_MM + DOT_PITCH_MM) / X_MM_PER_REV) * 360.0;
+const double COL_STEP_DEG         = (DOT_PITCH_MM / X_MM_PER_REV) * 360.0;
 const double LOAD_FEED_DEG        = (LOAD_FEED_MM / Y_MM_PER_REV) * 360.0;
 const double ROW_FEED_DEG         = (DOT_PITCH_MM / Y_MM_PER_REV) * 360.0;
-const double CHAR_GAP_FEED_DEG    = (CHAR_GAP_MM / Y_MM_PER_REV) * 360.0;
 const double EJECT_FEED_DEG       = (EJECT_FEED_MM / Y_MM_PER_REV) * 360.0;
 
 // Anti-backlash approach overshoot when returning left on VEX chain (deg).
-// Ensures both Col 0 and Col 1 are always approached from the left side.
 const double X_BACKLASH_DEG       = 8.0;
 
-// Punch, tolerance, speed, and safety thresholds.
-const double DEFAULT_PUNCH_DEG    = 115.0; // Nominal Z-axis punch stroke
+// Z-axis punch depth and post-dot lift clearance (degrees from top home 0).
+// Z_LIFT_TARGET_DEG = 0.0 lifts all the way back to top home after every
+// dot so the stylus clears the paper cleanly before X moves horizontally.
+const double DEFAULT_PUNCH_DEG    = 115.0; // Nominal downward Z stroke
 const double MIN_PUNCH_DEG        = 100.0; // Minimum calibrated Z stroke
 const double MAX_PUNCH_DEG        = 130.0; // Maximum calibrated Z stroke
+const double Z_LIFT_TARGET_DEG    = 0.0;   // Target angle after dot lift
 const double POS_TOLERANCE_DEG    = 0.5;   // Tight X/Y precision window
-const double Z_HOME_TOLERANCE_DEG = 2.0;   // Z top-return tolerance
+const double Z_HOME_TOLERANCE_DEG = 2.0;   // Z lift/return window
 const double STALL_CURRENT_AMP    = 1.15;  // Jam threshold during motion
 const double HOMING_STALL_AMP     = 0.80;  // Hard-stop homing threshold
 const double PAPER_BRIGHTNESS_MIN = 30.0;  // Optical paper threshold (%)
@@ -228,7 +230,7 @@ bool homeAllAxes(double &calibratedPunchDeg) {
     // Retract Z-axis stylus upward to upper mechanical stop via current
     // stall sensing after a 150 ms motor inrush mask (2500 ms max).
     if (MotorZ.installed()) {
-        MotorZ.spin(forward, 12, percent);
+        MotorZ.spin(forward, 20, percent);
         while (homingTimer.time(msec) < 2500 &&
                (homingTimer.time(msec) < 150 ||
                 MotorZ.current(amp) < HOMING_STALL_AMP)) {
@@ -488,18 +490,19 @@ int selectWordFromController(char wordBuffer[], int maxLen) {
 }
 
 // Function 4: Updates the VEX IQ Brain LCD with the active character,
-// percentage completion, cumulative punched dots, and elapsed job time.
-void updateLiveTelemetry(char currentChar, int charIndex, int totalChars,
+// active Braille row (1-3), completion percentage, cumulative punched
+// dots, and elapsed job time.
+void updateLiveTelemetry(char currentChar, int rowIndex, int totalRows,
                          int dotsPunched, timer &jobTimer) {
     int percentDone = 0;
-    if (totalChars > 0) {
-        percentDone = ((charIndex + 1) * 100) / totalChars;
+    if (totalRows > 0) {
+        percentDone = ((rowIndex + 1) * 100) / totalRows;
     }
 
     Brain.Screen.clearScreen();
     Brain.Screen.setCursor(1, 1);
-    Brain.Screen.print("Embossing: '%c' (%d/%d)",
-                       currentChar, charIndex + 1, totalChars);
+    Brain.Screen.print("Row %d/%d | Char: '%c'",
+                       rowIndex + 1, totalRows, currentChar);
     Brain.Screen.newLine();
     Brain.Screen.print("Progress:  %d%%", percentDone);
     Brain.Screen.newLine();
@@ -512,26 +515,22 @@ void updateLiveTelemetry(char currentChar, int charIndex, int totalChars,
 // Author: Nicholas Chan
 // =========================================================================
 
-// Function 5: Positions the bearing-guided X-axis carriage at Column 0 or
-// Column 1 via the 16T VEX IQ sprocket and chain drive within 0.5 deg.
-// Uses single-direction anti-backlash approach when moving left so VEX
-// chain slack never offsets the stylus from the 2.5 mm die holes.
-bool moveCarriageToColumn(int colIndex, double colZeroDeg,
-                          double colOneDeg) {
-    int effectiveCol = colIndex;
-    if (MIRROR_COLUMNS_FOR_DOWNWARD_PUNCH) {
-        effectiveCol = 1 - colIndex;
-    }
-
-    double targetDeg = colZeroDeg;
-    if (effectiveCol == 1) {
-        targetDeg = colOneDeg;
+// Function 5: Positions the bearing-guided X-axis carriage over any
+// horizontal grid hole (gridCol = 0, 1, 3, 4, ...) along the 2.5 mm
+// BrailleBasePlate via the 16T VEX sprocket within 0.5 deg. Uses
+// single-direction anti-backlash approach when returning left.
+bool moveCarriageToColumn(int gridCol, double colZeroDeg,
+                          double colStepDeg) {
+    double targetDeg = colZeroDeg + (gridCol * colStepDeg);
+    if (targetDeg < 0.0) {
+        targetDeg = 0.0;
     }
 
     timer moveTimer;
     moveTimer.clear();
     bool stalled = false;
     double currentDeg = -MotorX.position(degrees);
+    double maxMoveMs = 2000.0 + fabs(targetDeg - currentDeg) * 20.0;
 
     // If moving left (decreasing angle), overshoot past target by
     // X_BACKLASH_DEG (clamped >= 0) so the final approach is always
@@ -541,12 +540,16 @@ bool moveCarriageToColumn(int colIndex, double colZeroDeg,
         if (preTarget < 0.0) {
             preTarget = 0.0;
         }
-        MotorX.spin(forward, 8, percent);
+        int leftSpeed = 8;
+        if (currentDeg - preTarget > 25.0) {
+            leftSpeed = 12;
+        }
+        MotorX.spin(forward, leftSpeed, percent);
         while (-MotorX.position(degrees) > preTarget + POS_TOLERANCE_DEG &&
                !stalled) {
             if ((moveTimer.time(msec) > 150 &&
                  MotorX.current(amp) > STALL_CURRENT_AMP) ||
-                moveTimer.time(msec) > 2000) {
+                moveTimer.time(msec) > maxMoveMs) {
                 stalled = true;
             }
             wait(5, msec);
@@ -557,14 +560,18 @@ bool moveCarriageToColumn(int colIndex, double colZeroDeg,
         moveTimer.clear();
     }
 
-    // Final low-speed approach moving right (reverse spin) into target.
+    // Final approach moving right (reverse spin) into the exact hole.
     if (!stalled && targetDeg > currentDeg + POS_TOLERANCE_DEG) {
-        MotorX.spin(reverse, 8, percent);
+        int rightSpeed = 8;
+        if (targetDeg - currentDeg > 25.0) {
+            rightSpeed = 12;
+        }
+        MotorX.spin(reverse, rightSpeed, percent);
         while (-MotorX.position(degrees) < targetDeg - POS_TOLERANCE_DEG &&
                !stalled) {
             if ((moveTimer.time(msec) > 150 &&
                  MotorX.current(amp) > STALL_CURRENT_AMP) ||
-                moveTimer.time(msec) > 2000) {
+                moveTimer.time(msec) > maxMoveMs) {
                 stalled = true;
             }
             wait(5, msec);
@@ -577,15 +584,16 @@ bool moveCarriageToColumn(int colIndex, double colZeroDeg,
 
 // Function 6: Drives the Z-axis 60T gear and vertical rack downward to
 // targetDepthDeg, dwells for dwellTimeMsec to form a crisp Braille bump
-// inside the 3D-printed base indent, and retracts to 0 deg via encoder.
+// inside the 3D-printed base indent, and lifts cleanly back up to
+// Z_LIFT_TARGET_DEG (0 deg top clearance) before X moves horizontally.
 bool punchBrailleDot(double targetDepthDeg, int dwellTimeMsec) {
     timer strokeTimer;
     strokeTimer.clear();
 
     // Downward embossing stroke into the 3D-printed indented base plate.
-    MotorZ.spin(reverse, 12, percent);
+    MotorZ.spin(reverse, 22, percent);
     while (-MotorZ.position(degrees) < targetDepthDeg &&
-           strokeTimer.time(msec) < 1500) {
+           strokeTimer.time(msec) < 2500) {
         wait(5, msec);
     }
     MotorZ.stop(hold);
@@ -597,13 +605,14 @@ bool punchBrailleDot(double targetDepthDeg, int dwellTimeMsec) {
         wait(5, msec);
     }
 
-    // Retract upward to 0 deg via encoder, stopping early if upper stop
-    // is reached (stall current re-zeroes MotorZ to prevent drift).
+    // Lift stylus back up to Z_LIFT_TARGET_DEG (0 deg = full top lift)
+    // so it completely clears the paper before lateral carriage motion.
     strokeTimer.clear();
     bool hitTopStop = false;
-    MotorZ.spin(forward, 12, percent);
-    while (-MotorZ.position(degrees) > Z_HOME_TOLERANCE_DEG &&
-           strokeTimer.time(msec) < 1800 && !hitTopStop) {
+    MotorZ.spin(forward, 25, percent);
+    while (-MotorZ.position(degrees) >
+               Z_LIFT_TARGET_DEG + Z_HOME_TOLERANCE_DEG &&
+           strokeTimer.time(msec) < 2500 && !hitTopStop) {
         if (strokeTimer.time(msec) > 150 &&
             MotorZ.current(amp) >= HOMING_STALL_AMP) {
             hitTopStop = true;
@@ -616,7 +625,8 @@ bool punchBrailleDot(double targetDepthDeg, int dwellTimeMsec) {
         MotorZ.setPosition(0, degrees);
         return true;
     }
-    return (-MotorZ.position(degrees) <= Z_HOME_TOLERANCE_DEG);
+    return (-MotorZ.position(degrees) <=
+            Z_LIFT_TARGET_DEG + Z_HOME_TOLERANCE_DEG);
 }
 
 // =========================================================================
@@ -661,7 +671,7 @@ bool getCharDotMatrix(char letter, bool cellMatrix[3][2]) {
 
 // Function 8: Advances the paper strip via the single Y-axis roller axle
 // (PORT1, 2x 200 mm VEX travel wheels) by feedDegrees within 0.5 deg with
-// 150 ms inrush-masked jam detection. Uses slow speed (10%) on short dot
+// 150 ms inrush-masked jam detection. Uses slow speed (10%) on short row
 // steps to avoid overshoot and 25% on long ejection moves. Locks in hold
 // mode during punching when holdAfterFeed is true, or coasts when false.
 bool advancePaperStrip(double feedDegrees, bool holdAfterFeed) {
@@ -705,11 +715,11 @@ void executeCleanShutdown(int totalCharsEmbossed, int totalDotsPunched,
     timer shutdownTimer;
     shutdownTimer.clear();
 
-    // Ensure Z-axis stylus is safely retracted before moving paper or X.
+    // Ensure Z-axis stylus is fully lifted before moving paper or X.
     if (MotorZ.installed()) {
-        MotorZ.spin(forward, 12, percent);
+        MotorZ.spin(forward, 25, percent);
         while (-MotorZ.position(degrees) > Z_HOME_TOLERANCE_DEG &&
-               shutdownTimer.time(msec) < 1500 &&
+               shutdownTimer.time(msec) < 2000 &&
                (shutdownTimer.time(msec) < 150 ||
                 MotorZ.current(amp) < HOMING_STALL_AMP)) {
             wait(10, msec);
@@ -726,7 +736,7 @@ void executeCleanShutdown(int totalCharsEmbossed, int totalDotsPunched,
 
     // Park X-axis carriage at left home position.
     if (MotorX.installed()) {
-        moveCarriageToColumn(0, 0.0, COL_ONE_DEG);
+        moveCarriageToColumn(0, 0.0, COL_STEP_DEG);
     }
 
     // De-energize all 3 motors and optical LED for safe handling.
@@ -764,7 +774,7 @@ void executeCleanShutdown(int totalCharsEmbossed, int totalDotsPunched,
 }
 
 // =========================================================================
-// Main Control Loop
+// Main Control Loop (Row-by-Row Horizontal Word Embossing)
 // =========================================================================
 
 int main() {
@@ -772,10 +782,12 @@ int main() {
 
     double calibratedPunchDeg = DEFAULT_PUNCH_DEG;
     char wordBuffer[MAX_WORD_LENGTH];
+    bool wordCells[MAX_WORD_LENGTH][3][2];
+    bool charValid[MAX_WORD_LENGTH];
     bool isPaused = false;
     bool systemFault = false;
     int totalDotsPunched = 0;
-    int charsCompleted = 0;
+    int validCharCount = 0;
 
     if (!homeAllAxes(calibratedPunchDeg)) {
         executeCleanShutdown(0, 0, 0.0, true);
@@ -783,6 +795,14 @@ int main() {
     }
 
     int wordLen = selectWordFromController(wordBuffer, MAX_WORD_LENGTH);
+
+    // Pre-decode all queued characters into wordCells[i][row][col].
+    for (int i = 0; i < wordLen; i++) {
+        charValid[i] = getCharDotMatrix(wordBuffer[i], wordCells[i]);
+        if (charValid[i]) {
+            validCharCount++;
+        }
+    }
 
     timer jobTimer;
     jobTimer.clear();
@@ -795,57 +815,62 @@ int main() {
         systemFault = true;
     }
 
-    int charIdx = 0;
-    while (charIdx < wordLen && !systemFault) {
-        char currentChar = wordBuffer[charIdx];
-        bool cellMatrix[3][2];
+    // Sweep ROW BY ROW across the entire word (Row 0 -> Row 1 -> Row 2).
+    // Moving monotonically left-to-right across each row eliminates X chain
+    // reversal backlash between dots and matches the linear hole plate.
+    int row = 0;
+    while (row < 3 && !systemFault) {
+        if (!checkSafetyAndPaper(isPaused, jobTimer)) {
+            systemFault = true;
+        }
 
-        bool validChar = getCharDotMatrix(currentChar, cellMatrix);
-        updateLiveTelemetry(currentChar, charIdx, wordLen,
-                            totalDotsPunched, jobTimer);
-
-        if (validChar) {
-            int row = 0;
-            while (row < 3 && !systemFault) {
-                if (!checkSafetyAndPaper(isPaused, jobTimer)) {
-                    systemFault = true;
-                }
-
+        int charIdx = 0;
+        while (charIdx < wordLen && !systemFault) {
+            if (charValid[charIdx]) {
                 int col = 0;
                 while (col < 2 && !systemFault) {
-                    if (cellMatrix[row][col]) {
-                        if (!moveCarriageToColumn(col, COL_ZERO_DEG,
-                                                  COL_ONE_DEG)) {
+                    if (wordCells[charIdx][row][col]) {
+                        int effectiveCol = col;
+                        if (MIRROR_COLUMNS_FOR_DOWNWARD_PUNCH) {
+                            effectiveCol = 1 - col;
+                        }
+                        int gridCol =
+                            charIdx * CHAR_STEP_HOLES + effectiveCol;
+
+                        if (!moveCarriageToColumn(gridCol, COL_ZERO_DEG,
+                                                  COL_STEP_DEG)) {
                             systemFault = true;
                         } else if (!punchBrailleDot(calibratedPunchDeg,
                                                     PUNCH_DWELL_MSEC)) {
                             systemFault = true;
                         } else {
                             totalDotsPunched++;
-                            updateLiveTelemetry(currentChar, charIdx,
-                                                wordLen, totalDotsPunched,
+                            updateLiveTelemetry(wordBuffer[charIdx], row,
+                                                3, totalDotsPunched,
                                                 jobTimer);
                         }
                     }
                     col++;
                 }
-
-                if (!systemFault) {
-                    double feedStep = ROW_FEED_DEG;
-                    if (row == 2) {
-                        feedStep = CHAR_GAP_FEED_DEG;
-                    }
-                    if (!advancePaperStrip(feedStep, true)) {
-                        systemFault = true;
-                    }
-                }
-                row++;
             }
-            if (!systemFault) {
-                charsCompleted++;
+            charIdx++;
+        }
+
+        // After finishing a full horizontal row, return X left and step
+        // paper forward by 1 Braille dot row (2.5 mm) for the next row.
+        if (!systemFault && row < 2) {
+            if (!moveCarriageToColumn(0, 0.0, COL_STEP_DEG)) {
+                systemFault = true;
+            } else if (!advancePaperStrip(ROW_FEED_DEG, true)) {
+                systemFault = true;
             }
         }
-        charIdx++;
+        row++;
+    }
+
+    int charsCompleted = 0;
+    if (!systemFault) {
+        charsCompleted = validCharCount;
     }
 
     executeCleanShutdown(charsCompleted, totalDotsPunched,
