@@ -97,7 +97,7 @@ void vexcodeInit() {
 
 /*
  * MTE 100 / MTE 121 Design Project - Group 28
- * Automated Desktop Braille Embosser Control Firmware (v18 - Sensor Fix)
+ * Automated Desktop Braille Embosser Control Firmware (v19 - Robust X)
  *
  * Team Members:
  *   - Joseph Lu         : homeAllAxes, checkSafetyAndPaper
@@ -163,7 +163,8 @@ const double Z_LIFT_DEG           = 18.0;  // Strictly ~1 cm lift (deg)
 const double Z_MIN_CLEAR_DEG      = 8.0;   // Minimum lift to clear paper
 const double Z_MAX_DOWN_TRAVEL    = 90.0;  // Safety cap during stall punch
 const double POS_TOLERANCE_DEG    = 0.5;   // Tight X/Y precision window
-const double STALL_CURRENT_AMP    = 1.25;  // X/Y/Z-lift stall current
+const double STALL_CURRENT_AMP    = 1.25;  // Y/Z-lift stall current
+const double X_JAM_CURRENT_AMP    = 1.65;  // Sustained X jam fault current
 const double X_HOMING_STALL_AMP   = 1.40;  // Sustained X end-stop current
 const double Z_PUNCH_STALL_AMP    = 1.85;  // Max downward stall current
 const double OBSTRUCTION_MIN_MM   = 80.0;  // Default obstruction range (mm)
@@ -235,7 +236,7 @@ bool homeAllAxes(double &calibratedPressDeg, double &paperThreshold,
 
     Brain.Screen.clearScreen();
     Brain.Screen.setCursor(1, 1);
-    Brain.Screen.print("v18 Lift Z ~1cm");
+    Brain.Screen.print("v19 Lift Z ~1cm");
 
     // 1. Start with stylus resting at the bottom; zero encoder cleanly
     // without jamming downward, then lift strictly +18 deg (~1 cm) BEFORE
@@ -261,7 +262,7 @@ bool homeAllAxes(double &calibratedPressDeg, double &paperThreshold,
     // 2. With Z raised ~1 cm, home X-axis carriage ALL THE WAY to the
     // motor-side physical stop using sustained stall (180 ms continuous).
     Brain.Screen.newLine();
-    Brain.Screen.print("v18 Homing X...");
+    Brain.Screen.print("v19 Homing X...");
     homingTimer.clear();
     MotorX.spin(forward, 30, percent);
     int stallCount = 0;
@@ -275,7 +276,8 @@ bool homeAllAxes(double &calibratedPressDeg, double &paperThreshold,
         }
         wait(15, msec);
     }
-    MotorX.stop(brake);
+    MotorX.stop(coast);
+    wait(60, msec); // Relax chain preload against end stop before zeroing.
     MotorX.setPosition(0, degrees);
     wait(60, msec);
 
@@ -283,19 +285,11 @@ bool homeAllAxes(double &calibratedPressDeg, double &paperThreshold,
     MotorFeed.stop(coast);
     MotorFeed.setPosition(0, degrees);
 
-    // 3. Auto-calibrate DistanceBed threshold from clear-bed baseline.
+    // 3. Auto-calibrate DistanceBed threshold from clear-bed baseline
+    // (never fatal-abort at startup; runtime checkSafetyAndPaper pauses).
     wait(100, msec);
     bool startDistDetected = DistanceBed.isObjectDetected();
     double measuredBedDist = DistanceBed.objectDistance(mm);
-    if (startDistDetected && measuredBedDist > 0.0 &&
-        measuredBedDist < STARTUP_BLOCK_MM) {
-        TouchStatus.on(red);
-        Brain.Screen.clearScreen();
-        Brain.Screen.setCursor(1, 1);
-        Brain.Screen.print("Fault:Bed<20mm");
-        wait(1000, msec);
-        return false;
-    }
 
     distThreshold = OBSTRUCTION_MIN_MM;
     if (startDistDetected && measuredBedDist > 50.0 &&
@@ -319,7 +313,7 @@ bool homeAllAxes(double &calibratedPressDeg, double &paperThreshold,
     TouchStatus.on(blue);
     Brain.Screen.clearScreen();
     Brain.Screen.setCursor(1, 1);
-    Brain.Screen.print("v18 Ready Z:+%.0f", MotorZ.position(degrees));
+    Brain.Screen.print("v19 Ready Z:+%.0f", MotorZ.position(degrees));
     Brain.Screen.newLine();
     Brain.Screen.print("B:%.0f%% T:%.0f%%", startBright, paperThreshold);
     Brain.Screen.newLine();
@@ -565,12 +559,13 @@ bool moveCarriageToColumn(int charIdx, int dotCol, double colZeroDeg,
     moveTimer.clear();
     bool stalled = false;
     double currentDeg = -MotorX.position(degrees);
-    double maxMoveMs = 2500.0 + fabs(targetDeg - currentDeg) * 20.0;
+    double maxMoveMs = 4000.0 + fabs(targetDeg - currentDeg) * 25.0;
+    MotorX.setMaxTorque(100, percent);
 
     // Special case: returning to home (0 deg) on the motor side between
     // rows or on shutdown using sustained-stall detection.
     if (charIdx < 0 || targetDeg <= 0.5) {
-        MotorX.spin(forward, 26, percent);
+        MotorX.spin(forward, 28, percent);
         int homeStallCount = 0;
         while (-MotorX.position(degrees) > POS_TOLERANCE_DEG &&
                moveTimer.time(msec) < maxMoveMs &&
@@ -584,7 +579,8 @@ bool moveCarriageToColumn(int charIdx, int dotCol, double colZeroDeg,
             }
             wait(15, msec);
         }
-        MotorX.stop(brake);
+        MotorX.stop(coast);
+        wait(50, msec);
         MotorX.setPosition(0, degrees);
         wait(40, msec);
         return true;
@@ -598,17 +594,25 @@ bool moveCarriageToColumn(int charIdx, int dotCol, double colZeroDeg,
         if (preTarget < 0.0) {
             preTarget = 0.0;
         }
-        int leftSpeed = 20;
+        int leftSpeed = 28;
         if (currentDeg - preTarget > 30.0) {
-            leftSpeed = 24;
+            leftSpeed = 32;
         }
+        int jamCount = 0;
         MotorX.spin(forward, leftSpeed, percent);
         while (-MotorX.position(degrees) > preTarget + POS_TOLERANCE_DEG &&
                !stalled) {
-            if ((moveTimer.time(msec) > 350 &&
-                 fabs(MotorX.velocity(rpm)) < 1.5 &&
-                 MotorX.current(amp) > STALL_CURRENT_AMP) ||
-                moveTimer.time(msec) > maxMoveMs) {
+            if (moveTimer.time(msec) > 600 &&
+                fabs(MotorX.velocity(rpm)) < 1.5 &&
+                MotorX.current(amp) >= X_JAM_CURRENT_AMP) {
+                jamCount++;
+                if (jamCount >= 50) {
+                    stalled = true;
+                }
+            } else {
+                jamCount = 0;
+            }
+            if (moveTimer.time(msec) > maxMoveMs) {
                 stalled = true;
             }
             wait(5, msec);
@@ -621,17 +625,25 @@ bool moveCarriageToColumn(int charIdx, int dotCol, double colZeroDeg,
 
     // Final approach moving right (reverse spin) into the exact hole.
     if (!stalled && targetDeg > currentDeg + POS_TOLERANCE_DEG) {
-        int rightSpeed = 20;
+        int rightSpeed = 28;
         if (targetDeg - currentDeg > 30.0) {
-            rightSpeed = 24;
+            rightSpeed = 32;
         }
+        int jamCount = 0;
         MotorX.spin(reverse, rightSpeed, percent);
         while (-MotorX.position(degrees) < targetDeg - POS_TOLERANCE_DEG &&
                !stalled) {
-            if ((moveTimer.time(msec) > 350 &&
-                 fabs(MotorX.velocity(rpm)) < 1.5 &&
-                 MotorX.current(amp) > STALL_CURRENT_AMP) ||
-                moveTimer.time(msec) > maxMoveMs) {
+            if (moveTimer.time(msec) > 600 &&
+                fabs(MotorX.velocity(rpm)) < 1.5 &&
+                MotorX.current(amp) >= X_JAM_CURRENT_AMP) {
+                jamCount++;
+                if (jamCount >= 50) {
+                    stalled = true;
+                }
+            } else {
+                jamCount = 0;
+            }
+            if (moveTimer.time(msec) > maxMoveMs) {
                 stalled = true;
             }
             wait(5, msec);
@@ -861,7 +873,7 @@ void executeCleanShutdown(int totalCharsEmbossed, int totalDotsPunched,
     Brain.Screen.newLine();
     Brain.Screen.print("Time: %.1fs", totalTimeSec);
 
-    wait(3000, msec);
+    wait(5000, msec);
     Brain.programStop();
 }
 
