@@ -28,8 +28,8 @@ inertial BrainInertial = inertial();
 motor MotorFeed = motor(PORT9, false);
 motor MotorX = motor(PORT10, false);
 motor MotorZ = motor(PORT7, false);
-optical OpticalPaper = optical(PORT8);
-distance DistanceBed = distance(PORT12);
+optical OpticalPaper = optical(PORT12);
+distance DistanceBed = distance(PORT8);
 touchled TouchStatus = touchled(PORT11);
 controller Controller = controller();
 
@@ -114,8 +114,8 @@ void vexcodeInit() {
  *                            101.6 mm/rev) driving bearing carriage
  *   - PORT7  (MotorZ)      : 60T blue spur gear & vertical rack stylus into
  *                            3D-printed BrailleBasePlate (pre-made indents)
- *   - PORT8  (OpticalPaper): Paper presence / brightness sensor (Colour)
- *   - PORT12 (DistanceBed) : Bed height calibration & obstruction interlock
+ *   - PORT12 (OpticalPaper): Paper presence / brightness sensor (higher)
+ *   - PORT8  (DistanceBed) : Bed height calibration & obstruction (lower)
  *   - PORT11 (TouchStatus) : User Start/Pause input & RGB status indicator
  */
 
