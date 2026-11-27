@@ -151,11 +151,11 @@ const double EJECT_FEED_DEG       = (EJECT_FEED_MM / Y_MM_PER_REV) * 360.0;
 // Anti-backlash approach overshoot when returning left on VEX chain (deg).
 const double X_BACKLASH_DEG       = 8.0;
 
-// Z-axis auto-probe and punch parameters (VEX IQ 60T gear ~ 0.28 mm/deg).
+// Z-axis auto-probe and punch parameters (spur gear + vertical rack).
 // Startup calibration probes downward into Hole 0 until contact, then
 // adds Z_INDENT_EXTRA_DEG for firm embossing into the 3D-printed die.
-const double DEFAULT_PUNCH_DEG    = 110.0; // Fallback Z stroke (~31 mm)
-const double MIN_PUNCH_DEG        = 45.0;  // Minimum allowed Z stroke
+const double DEFAULT_PUNCH_DEG    = 110.0; // Fallback Z stroke (deg)
+const double MIN_PUNCH_DEG        = 15.0;  // Minimum valid Z probe (deg)
 const double MAX_PUNCH_DEG        = 240.0; // Maximum probe/punch travel
 const double Z_INDENT_EXTRA_DEG   = 10.0;  // Extra press past contact
 const double Z_LIFT_TARGET_DEG    = 0.0;   // Target angle after dot lift
@@ -275,7 +275,7 @@ bool homeAllAxes(double &calibratedPunchDeg, double &paperThreshold) {
     MotorZ.spin(reverse, 25, percent);
     while (-MotorZ.position(degrees) < MAX_PUNCH_DEG &&
            homingTimer.time(msec) < 3500 &&
-           (homingTimer.time(msec) < 250 ||
+           (homingTimer.time(msec) < 150 ||
             (fabs(MotorZ.velocity(rpm)) > 2.0 &&
              MotorZ.current(amp) < HOMING_STALL_AMP))) {
         wait(10, msec);
@@ -427,7 +427,7 @@ bool checkSafetyAndPaper(bool &isPaused, timer &jobTimer,
 
 // Function 3: Interactive word queue allowing the user to select up to
 // (maxLen - 1) characters ('A'-'Z' and ' ') using Brain or Controller
-// buttons, then start embossing with TouchStatus (or Brain Down / FDown).
+// buttons, then start embossing with TouchStatus (or Controller FDown).
 // Defaults to "UW" if started with an empty queue.
 int selectWordFromController(char wordBuffer[], int maxLen) {
     int charCount = 0;
@@ -456,7 +456,7 @@ int selectWordFromController(char wordBuffer[], int maxLen) {
             Brain.Screen.print("(Default: UW)");
         }
         Brain.Screen.newLine();
-        Brain.Screen.print("LED/Dn = Start");
+        Brain.Screen.print("Touch LED=Start");
 
         // Cycle character forward (Brain Right or Controller E Up).
         if (Brain.buttonRight.pressing() ||
@@ -492,15 +492,14 @@ int selectWordFromController(char wordBuffer[], int maxLen) {
             }
         }
 
-        // Confirm queued word via TouchStatus, Brain Down, or FDown.
+        // Confirm queued word via TouchStatus or Controller FDown
+        // (avoids Brain.buttonDown/buttonLeft alias collision on IQ).
         bool startTriggered =
             TouchStatus.pressing() ||
-            Brain.buttonDown.pressing() ||
             Controller.ButtonFDown.pressing();
 
         if (startTriggered) {
             while (TouchStatus.pressing() ||
-                   Brain.buttonDown.pressing() ||
                    Controller.ButtonFDown.pressing()) {
                 wait(15, msec);
             }
