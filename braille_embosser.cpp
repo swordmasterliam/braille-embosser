@@ -154,17 +154,17 @@ const double EJECT_FEED_DEG       = (EJECT_FEED_MM / Y_MM_PER_REV) * 360.0;
 const double X_BACKLASH_DEG       = 8.0;
 
 // Z-axis punch depth and post-dot lift clearance (degrees from top home 0).
-// Z_LIFT_TARGET_DEG = 0.0 lifts all the way back to top home after every
-// dot so the stylus clears the paper cleanly before X moves horizontally.
-const double DEFAULT_PUNCH_DEG    = 115.0; // Nominal downward Z stroke
-const double MIN_PUNCH_DEG        = 100.0; // Minimum calibrated Z stroke
-const double MAX_PUNCH_DEG        = 130.0; // Maximum calibrated Z stroke
+// 60T VEX gear travels ~0.665 mm/deg: 35 deg = ~23 mm downward stroke.
+// Start with the dot pusher RAISED TO THE MAX (still meshed with gear).
+const double DEFAULT_PUNCH_DEG    = 35.0;  // Nominal downward Z stroke
+const double MIN_PUNCH_DEG        = 25.0;  // Minimum calibrated Z stroke
+const double MAX_PUNCH_DEG        = 55.0;  // Maximum calibrated Z stroke
 const double Z_LIFT_TARGET_DEG    = 0.0;   // Target angle after dot lift
 const double POS_TOLERANCE_DEG    = 0.5;   // Tight X/Y precision window
 const double Z_HOME_TOLERANCE_DEG = 2.0;   // Z lift/return window
 const double STALL_CURRENT_AMP    = 1.15;  // Jam threshold during motion
 const double HOMING_STALL_AMP     = 0.80;  // Hard-stop homing threshold
-const double PAPER_BRIGHTNESS_MIN = 30.0;  // Optical paper threshold (%)
+const double PAPER_BRIGHTNESS_MIN = 8.0;   // Optical brightness min (%)
 const double OBSTRUCTION_MIN_MM   = 25.0;  // Minimum safe bed clearance
 const int    PUNCH_DWELL_MSEC     = 300;   // Dwell time to form dot (ms)
 const int    MAX_WORD_LENGTH      = 16;    // Max queued chars per job
@@ -221,10 +221,10 @@ bool homeAllAxes(double &calibratedPunchDeg) {
     Brain.Screen.setCursor(1, 1);
     Brain.Screen.print("Homing Z-Axis...");
 
-    // Retract Z-axis stylus upward to upper mechanical stop via current
-    // stall sensing after a 150 ms motor inrush mask (2500 ms max).
-    MotorZ.spin(forward, 20, percent);
-    while (homingTimer.time(msec) < 2500 &&
+    // Gently snug Z-axis stylus upward (start with pusher raised to max)
+    // using a short 400 ms guard so the rack never runs off the 60T gear.
+    MotorZ.spin(forward, 15, percent);
+    while (homingTimer.time(msec) < 400 &&
            (homingTimer.time(msec) < 150 ||
             MotorZ.current(amp) < HOMING_STALL_AMP)) {
         wait(10, msec);
@@ -245,13 +245,14 @@ bool homeAllAxes(double &calibratedPunchDeg) {
     MotorX.stop(brake);
     MotorX.setPosition(0, degrees);
 
-    // Leave single Y-axis roller axle (PORT1) in coast for easy loading.
+    // Leave single Y-axis roller axle (PORT9) in coast for easy loading.
     MotorFeed.stop(coast);
     MotorFeed.setPosition(0, degrees);
 
     // Verify embossing zone is unobstructed and calibrate Z punch stroke.
     calibratedPunchDeg = DEFAULT_PUNCH_DEG;
     double measuredBedDist = DistanceBed.objectDistance(mm);
+    double startBright = OpticalPaper.brightness();
     if (measuredBedDist > 0.0 && measuredBedDist < OBSTRUCTION_MIN_MM) {
         TouchStatus.on(red);
         Brain.Screen.newLine();
@@ -262,7 +263,7 @@ bool homeAllAxes(double &calibratedPunchDeg) {
 
     if (measuredBedDist >= 35.0 && measuredBedDist <= 95.0) {
         calibratedPunchDeg =
-            DEFAULT_PUNCH_DEG + (measuredBedDist - 60.0) * 1.4;
+            DEFAULT_PUNCH_DEG + (measuredBedDist - 60.0) * 0.4;
         if (calibratedPunchDeg < MIN_PUNCH_DEG) {
             calibratedPunchDeg = MIN_PUNCH_DEG;
         } else if (calibratedPunchDeg > MAX_PUNCH_DEG) {
@@ -272,9 +273,9 @@ bool homeAllAxes(double &calibratedPunchDeg) {
 
     TouchStatus.on(blue);
     Brain.Screen.newLine();
-    Brain.Screen.print("Homed! D:%.0fmm Z:%.0f",
-                       measuredBedDist, calibratedPunchDeg);
-    wait(900, msec);
+    Brain.Screen.print("B:%.0f%% D:%.0f Z:%.0f",
+                       startBright, measuredBedDist, calibratedPunchDeg);
+    wait(1000, msec);
     return true;
 }
 
@@ -289,9 +290,10 @@ bool checkSafetyAndPaper(bool &isPaused, timer &jobTimer) {
         }
     }
 
+    // Use optical brightness without isNearObject() since sensor sits
+    // ~45 mm above the paper strip on the Tetrix upright bracket.
     double optBright = OpticalPaper.brightness();
-    bool paperMissing =
-        (!OpticalPaper.isNearObject() || optBright < PAPER_BRIGHTNESS_MIN);
+    bool paperMissing = (optBright < PAPER_BRIGHTNESS_MIN);
 
     double bedClearanceMm = DistanceBed.objectDistance(mm);
     bool obstructionDetected =
@@ -324,7 +326,7 @@ bool checkSafetyAndPaper(bool &isPaused, timer &jobTimer) {
     Brain.Screen.newLine();
     Brain.Screen.print("B:%.0f%% D:%.0fmm", optBright, bedClearanceMm);
     Brain.Screen.newLine();
-    Brain.Screen.print("Tap LED/Check Resume");
+    Brain.Screen.print("LED=Resume Check=Skip");
 
     timer pauseTimer;
     pauseTimer.clear();
@@ -332,18 +334,18 @@ bool checkSafetyAndPaper(bool &isPaused, timer &jobTimer) {
 
     while (pauseTimer.time(seconds) < 25.0 && !resumed) {
         bool paperPresentNow =
-            (OpticalPaper.isNearObject() &&
-             OpticalPaper.brightness() >= PAPER_BRIGHTNESS_MIN);
+            (OpticalPaper.brightness() >= PAPER_BRIGHTNESS_MIN);
 
         double currentClearance = DistanceBed.objectDistance(mm);
         bool pathClearNow =
             (currentClearance <= 0.0 ||
              currentClearance >= OBSTRUCTION_MIN_MM);
 
-        bool resumePressed =
-            TouchStatus.pressing() || Brain.buttonCheck.pressing();
+        bool ledResume =
+            TouchStatus.pressing() && paperPresentNow && pathClearNow;
+        bool manualOverride = Brain.buttonCheck.pressing();
 
-        if (resumePressed && paperPresentNow && pathClearNow) {
+        if (ledResume || manualOverride) {
             while (TouchStatus.pressing() ||
                    Brain.buttonCheck.pressing()) {
                 wait(15, msec);
@@ -559,10 +561,13 @@ bool punchBrailleDot(double targetDepthDeg, int dwellTimeMsec) {
     timer strokeTimer;
     strokeTimer.clear();
 
-    // Downward embossing stroke into the 3D-printed indented base plate.
+    // Downward embossing stroke into the 3D-printed indented base plate
+    // (stops cleanly at targetDepthDeg or if stylus seats firmly in die).
     MotorZ.spin(reverse, 22, percent);
     while (-MotorZ.position(degrees) < targetDepthDeg &&
-           strokeTimer.time(msec) < 2500) {
+           strokeTimer.time(msec) < 2000 &&
+           (strokeTimer.time(msec) < 150 ||
+            MotorZ.current(amp) < STALL_CURRENT_AMP)) {
         wait(5, msec);
     }
     MotorZ.stop(hold);
