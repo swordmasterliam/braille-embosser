@@ -97,7 +97,7 @@ void vexcodeInit() {
 
 /*
  * MTE 100 / MTE 121 Design Project - Group 28
- * Automated Desktop Braille Embosser Control Firmware (v11 - Bottom-Zero Z)
+ * Automated Desktop Braille Embosser Control Firmware (v12 - Bottom-Zero Z)
  *
  * Team Members:
  *   - Joseph Lu         : homeAllAxes, checkSafetyAndPaper
@@ -169,6 +169,7 @@ const double Z_PUNCH_CURRENT_AMP  = 1.75;  // High Z embossing force current
 const double HOMING_STALL_AMP     = 0.85;  // Gentle bottom-snug current
 const double OBSTRUCTION_MIN_MM   = 25.0;  // Minimum safe bed clearance
 const int    PUNCH_DWELL_MSEC     = 400;   // Active-press dwell time (ms)
+const int    Z_POST_LIFT_PAUSE_MS = 450;   // Pause after lift before X
 const int    MAX_WORD_LENGTH      = 16;    // Max queued chars per job
 const bool   MIRROR_COLUMNS_FOR_DOWNWARD_PUNCH = false;
 
@@ -231,7 +232,7 @@ bool homeAllAxes(double &calibratedPressDeg, double &paperThreshold) {
 
     Brain.Screen.clearScreen();
     Brain.Screen.setCursor(1, 1);
-    Brain.Screen.print("v11 Zeroing Z...");
+    Brain.Screen.print("v12 Zeroing Z...");
 
     // 1. Gently snug Z downward (start with stylus all the way down) and
     // define 0.0 deg as exact paper / base plate bottom contact.
@@ -246,25 +247,27 @@ bool homeAllAxes(double &calibratedPressDeg, double &paperThreshold) {
     wait(60, msec); // Allow VEX IQ smart-port encoder reset to register.
     calibratedPressDeg = Z_PRESS_OVERDRIVE;
 
-    // 2. Lift Z cleanly upward by Z_LIFT_DEG (+40 deg) and settle BEFORE X
+    // 2. Lift Z gently upward by Z_LIFT_DEG (+40 deg) and pause BEFORE X
     // moves sideways, while staying well below the rack top prongs.
     Brain.Screen.newLine();
-    Brain.Screen.print("v11 Lift Z +40..");
+    Brain.Screen.print("v12 Lift Z +40..");
     homingTimer.clear();
-    MotorZ.spin(forward, 40, percent);
-    while ((homingTimer.time(msec) < 100 ||
+    MotorZ.setMaxTorque(45, percent);
+    MotorZ.spin(forward, 20, percent);
+    while ((homingTimer.time(msec) < 150 ||
             MotorZ.position(degrees) < Z_LIFT_DEG) &&
-           homingTimer.time(msec) < 1500 &&
-           (homingTimer.time(msec) < 150 ||
-            MotorZ.current(amp) < Z_PUNCH_CURRENT_AMP)) {
+           homingTimer.time(msec) < 2000 &&
+           (homingTimer.time(msec) < 200 ||
+            MotorZ.current(amp) < HOMING_STALL_AMP)) {
         wait(5, msec);
     }
     MotorZ.stop(hold);
-    wait(150, msec); // Guarantee stylus is fully raised before X moves.
+    MotorZ.setMaxTorque(100, percent);
+    wait(Z_POST_LIFT_PAUSE_MS, msec); // Full pause before X moves.
 
     // 3. Home X-axis carriage ALL THE WAY to the left physical edge.
     Brain.Screen.newLine();
-    Brain.Screen.print("v11 Homing X...");
+    Brain.Screen.print("v12 Homing X...");
     homingTimer.clear();
     MotorX.spin(forward, 22, percent);
     while (homingTimer.time(msec) < 6000 &&
@@ -303,7 +306,7 @@ bool homeAllAxes(double &calibratedPressDeg, double &paperThreshold) {
     TouchStatus.on(blue);
     Brain.Screen.clearScreen();
     Brain.Screen.setCursor(1, 1);
-    Brain.Screen.print("v11 Ready!");
+    Brain.Screen.print("v12 Ready!");
     Brain.Screen.newLine();
     Brain.Screen.print("Z:+%.0f B:%.0f%%",
                        MotorZ.position(degrees), startBright);
@@ -645,19 +648,23 @@ bool punchBrailleDot(double pressOverdriveDeg, int dwellTimeMsec) {
     while (dwellTimer.time(msec) < dwellTimeMsec) {
         wait(5, msec);
     }
+    MotorZ.stop(hold);
+    wait(60, msec); // Release downward gear preload before lifting gently.
 
-    // Lift stylus cleanly back up to +Z_LIFT_DEG (+40 deg) and settle
-    // fully BEFORE returning so X can never drag across the paper.
+    // Lift stylus gently back up to +Z_LIFT_DEG (+40 deg) at reduced
+    // upward torque/speed, then pause 450 ms BEFORE X moves sideways.
     strokeTimer.clear();
-    MotorZ.spin(forward, 45, percent);
+    MotorZ.setMaxTorque(45, percent);
+    MotorZ.spin(forward, 20, percent);
     while (MotorZ.position(degrees) < Z_LIFT_DEG &&
-           strokeTimer.time(msec) < 1500 &&
-           (strokeTimer.time(msec) < 150 ||
-            MotorZ.current(amp) < Z_PUNCH_CURRENT_AMP)) {
+           strokeTimer.time(msec) < 2000 &&
+           (strokeTimer.time(msec) < 200 ||
+            MotorZ.current(amp) < HOMING_STALL_AMP)) {
         wait(5, msec);
     }
     MotorZ.stop(hold);
-    wait(150, msec);
+    MotorZ.setMaxTorque(100, percent);
+    wait(Z_POST_LIFT_PAUSE_MS, msec);
 
     // Fail only if Z genuinely failed to clear the paper (< 15 deg lift).
     return (MotorZ.position(degrees) >= Z_MIN_CLEAR_DEG);
@@ -748,18 +755,20 @@ void executeCleanShutdown(int totalCharsEmbossed, int totalDotsPunched,
     timer shutdownTimer;
     shutdownTimer.clear();
 
-    // Ensure Z-axis stylus is lifted to +Z_LIFT_DEG before moving paper/X.
+    // Ensure Z-axis stylus is lifted gently to +Z_LIFT_DEG before eject.
     if (MotorZ.position(degrees) < Z_LIFT_DEG) {
-        MotorZ.spin(forward, 40, percent);
+        MotorZ.setMaxTorque(45, percent);
+        MotorZ.spin(forward, 20, percent);
         while (MotorZ.position(degrees) < Z_LIFT_DEG &&
-               shutdownTimer.time(msec) < 1500 &&
-               (shutdownTimer.time(msec) < 150 ||
-                MotorZ.current(amp) < Z_PUNCH_CURRENT_AMP)) {
+               shutdownTimer.time(msec) < 2000 &&
+               (shutdownTimer.time(msec) < 200 ||
+                MotorZ.current(amp) < HOMING_STALL_AMP)) {
             wait(10, msec);
         }
     }
     MotorZ.stop(hold);
-    wait(150, msec);
+    MotorZ.setMaxTorque(100, percent);
+    wait(Z_POST_LIFT_PAUSE_MS, msec);
 
     // Eject finished Braille strip on normal completion; release on fault.
     if (faultCode == FAULT_NONE) {
