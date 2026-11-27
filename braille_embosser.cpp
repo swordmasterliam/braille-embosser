@@ -97,7 +97,7 @@ void vexcodeInit() {
 
 /*
  * MTE 100 / MTE 121 Design Project - Group 28
- * Automated Desktop Braille Embosser Control Firmware (v14 - Relative Z)
+ * Automated Desktop Braille Embosser Control Firmware (v15 - Stall Punch)
  *
  * Team Members:
  *   - Joseph Lu         : homeAllAxes, checkSafetyAndPaper
@@ -161,14 +161,14 @@ const double X_BACKLASH_DEG       = 8.0;
 //   above the actual bottom position so the rack can NEVER creep higher.
 const double Z_LIFT_DEG           = 18.0;  // Strictly ~1 cm lift (deg)
 const double Z_MIN_CLEAR_DEG      = 8.0;   // Minimum lift to clear paper
-const double Z_PRESS_OVERDRIVE    = 10.0;  // Max extra down past lift (deg)
+const double Z_MAX_DOWN_TRAVEL    = 90.0;  // Safety cap during stall punch
 const double POS_TOLERANCE_DEG    = 0.5;   // Tight X/Y precision window
 const double STALL_CURRENT_AMP    = 1.25;  // X/Y/Z-lift stall current
 const double X_HOMING_STALL_AMP   = 1.40;  // Sustained X end-stop current
-const double Z_PUNCH_CURRENT_AMP  = 1.60;  // High Z embossing seating amp
+const double Z_PUNCH_STALL_AMP    = 1.45;  // Downward punch stall current
 const double OBSTRUCTION_MIN_MM   = 25.0;  // Minimum safe bed clearance
 const int    PUNCH_DWELL_MSEC     = 350;   // Hold-at-bottom dwell (ms)
-const int    Z_POST_LIFT_PAUSE_MS = 150;   // Wait 150 ms AFTER reaching top
+const int    Z_POST_LIFT_PAUSE_MS = 450;   // Pause at top before X (3x)
 const int    MAX_WORD_LENGTH      = 16;    // Max queued chars per job
 const bool   MIRROR_COLUMNS_FOR_DOWNWARD_PUNCH = false;
 
@@ -232,7 +232,7 @@ bool homeAllAxes(double &calibratedPressDeg, double &paperThreshold) {
 
     Brain.Screen.clearScreen();
     Brain.Screen.setCursor(1, 1);
-    Brain.Screen.print("v14 Lift Z ~1cm");
+    Brain.Screen.print("v15 Lift Z ~1cm");
 
     // 1. Start with stylus resting at the bottom; zero encoder cleanly
     // without jamming downward, then lift strictly +18 deg (~1 cm) BEFORE
@@ -240,7 +240,7 @@ bool homeAllAxes(double &calibratedPressDeg, double &paperThreshold) {
     MotorZ.stop(hold);
     MotorZ.setPosition(0, degrees);
     wait(50, msec);
-    calibratedPressDeg = Z_PRESS_OVERDRIVE;
+    calibratedPressDeg = Z_MAX_DOWN_TRAVEL;
 
     homingTimer.clear();
     MotorZ.setMaxTorque(70, percent);
@@ -253,12 +253,12 @@ bool homeAllAxes(double &calibratedPressDeg, double &paperThreshold) {
     }
     MotorZ.stop(hold);
     MotorZ.setMaxTorque(100, percent);
-    wait(Z_POST_LIFT_PAUSE_MS, msec); // Wait 150 ms AFTER reaching top.
+    wait(Z_POST_LIFT_PAUSE_MS, msec); // Pause 450 ms AFTER reaching top.
 
     // 2. With Z raised ~1 cm, home X-axis carriage ALL THE WAY to the
     // motor-side physical stop using sustained stall (180 ms continuous).
     Brain.Screen.newLine();
-    Brain.Screen.print("v14 Homing X...");
+    Brain.Screen.print("v15 Homing X...");
     homingTimer.clear();
     MotorX.spin(forward, 30, percent);
     int stallCount = 0;
@@ -303,7 +303,7 @@ bool homeAllAxes(double &calibratedPressDeg, double &paperThreshold) {
     TouchStatus.on(blue);
     Brain.Screen.clearScreen();
     Brain.Screen.setCursor(1, 1);
-    Brain.Screen.print("v14 Ready!");
+    Brain.Screen.print("v15 Ready!");
     Brain.Screen.newLine();
     Brain.Screen.print("Z:+%.0f B:%.0f%%",
                        MotorZ.position(degrees), startBright);
@@ -628,24 +628,35 @@ bool moveCarriageToColumn(int charIdx, int dotCol, double colZeroDeg,
 }
 
 // Function 6: Pushes the Z-axis stylus SLOWLY down at full 100% torque
-// relative to topPos (max Z_LIFT_DEG + pressOverdriveDeg or 1.60 A),
-// holds firmly at bottom without spinning/skipping rack teeth, then lifts
-// strictly +Z_LIFT_DEG (+18 deg = ~1 cm) relative to actual bottomPos and
-// waits 150 ms AFTER reaching the top BEFORE X moves sideways.
-bool punchBrailleDot(double pressOverdriveDeg, int dwellTimeMsec) {
+// until physical stall (current >= 1.45 A or sustained vel < 2 rpm, safety
+// capped at maxDownTravelDeg), holds firmly at bottom during dwellTimeMsec,
+// then lifts strictly +Z_LIFT_DEG (+18 deg = ~1 cm) above actual bottomPos
+// and pauses 450 ms AT THE TOP before X moves sideways.
+bool punchBrailleDot(double maxDownTravelDeg, int dwellTimeMsec) {
     timer strokeTimer;
     strokeTimer.clear();
 
     double topPos = MotorZ.position(degrees);
-    double maxDownTravel = Z_LIFT_DEG + pressOverdriveDeg;
 
-    // Slow, high-force downward embossing stroke (25% speed, 100% torque).
+    // Slow, high-force downward embossing stroke until firm bottom stall.
     MotorZ.setMaxTorque(100, percent);
     MotorZ.spin(reverse, 25, percent);
-    while ((topPos - MotorZ.position(degrees)) < maxDownTravel &&
-           strokeTimer.time(msec) < 1500 &&
-           (strokeTimer.time(msec) < 150 ||
-            MotorZ.current(amp) < Z_PUNCH_CURRENT_AMP)) {
+    int zStallCount = 0;
+    bool bottomStalled = false;
+    while ((topPos - MotorZ.position(degrees)) < maxDownTravelDeg &&
+           strokeTimer.time(msec) < 2000 && !bottomStalled) {
+        if (strokeTimer.time(msec) > 150) {
+            if (MotorZ.current(amp) >= Z_PUNCH_STALL_AMP) {
+                bottomStalled = true;
+            } else if (fabs(MotorZ.velocity(rpm)) < 2.0) {
+                zStallCount++;
+                if (zStallCount >= 16) {
+                    bottomStalled = true;
+                }
+            } else {
+                zStallCount = 0;
+            }
+        }
         wait(5, msec);
     }
     MotorZ.stop(hold);
@@ -674,7 +685,7 @@ bool punchBrailleDot(double pressOverdriveDeg, int dwellTimeMsec) {
     }
     MotorZ.stop(hold);
     MotorZ.setMaxTorque(100, percent);
-    wait(Z_POST_LIFT_PAUSE_MS, msec); // Wait 150 ms AFTER reaching top.
+    wait(Z_POST_LIFT_PAUSE_MS, msec); // Pause 450 ms AFTER reaching top.
 
     // Fail only if Z genuinely failed to lift at least 8 deg off bottom.
     return ((MotorZ.position(degrees) - bottomPos) >= Z_MIN_CLEAR_DEG);
@@ -838,7 +849,7 @@ void executeCleanShutdown(int totalCharsEmbossed, int totalDotsPunched,
 int main() {
     vexcodeInit();
 
-    double calibratedPressDeg = Z_PRESS_OVERDRIVE;
+    double calibratedPressDeg = Z_MAX_DOWN_TRAVEL;
     double paperThreshold = 0.0;
     char wordBuffer[MAX_WORD_LENGTH];
     bool wordCells[MAX_WORD_LENGTH][3][2];
