@@ -97,7 +97,7 @@ void vexcodeInit() {
 
 /*
  * MTE 100 / MTE 121 Design Project - Group 28
- * Automated Desktop Braille Embosser Control Firmware (v19 - Robust X)
+ * Automated Desktop Braille Embosser Control Firmware (v20 - Paper Gate)
  *
  * Team Members:
  *   - Joseph Lu         : homeAllAxes, checkSafetyAndPaper
@@ -168,6 +168,7 @@ const double X_JAM_CURRENT_AMP    = 1.65;  // Sustained X jam fault current
 const double X_HOMING_STALL_AMP   = 1.40;  // Sustained X end-stop current
 const double Z_PUNCH_STALL_AMP    = 1.85;  // Max downward stall current
 const double OBSTRUCTION_MIN_MM   = 80.0;  // Default obstruction range (mm)
+const double WHITE_PAPER_MIN_PCT  = 18.0;  // Min optical brightness (%)
 const double STARTUP_BLOCK_MM     = 20.0;  // Startup blocked limit (mm)
 const int    PUNCH_SQUEEZE_MSEC   = 150;   // Active bottom squeeze (ms)
 const int    PUNCH_DWELL_MSEC     = 250;   // Hold-at-bottom dwell (ms)
@@ -236,7 +237,7 @@ bool homeAllAxes(double &calibratedPressDeg, double &paperThreshold,
 
     Brain.Screen.clearScreen();
     Brain.Screen.setCursor(1, 1);
-    Brain.Screen.print("v19 Lift Z ~1cm");
+    Brain.Screen.print("v20 Lift Z ~1cm");
 
     // 1. Start with stylus resting at the bottom; zero encoder cleanly
     // without jamming downward, then lift strictly +18 deg (~1 cm) BEFORE
@@ -262,7 +263,7 @@ bool homeAllAxes(double &calibratedPressDeg, double &paperThreshold,
     // 2. With Z raised ~1 cm, home X-axis carriage ALL THE WAY to the
     // motor-side physical stop using sustained stall (180 ms continuous).
     Brain.Screen.newLine();
-    Brain.Screen.print("v19 Homing X...");
+    Brain.Screen.print("v20 Homing X...");
     homingTimer.clear();
     MotorX.spin(forward, 30, percent);
     int stallCount = 0;
@@ -302,18 +303,19 @@ bool homeAllAxes(double &calibratedPressDeg, double &paperThreshold,
         }
     }
 
-    // 4. Auto-calibrate OpticalPaper brightness from startup state.
+    // 4. Calibrate OpticalPaper white-paper threshold. NEVER disable to 0:
+    // require at least WHITE_PAPER_MIN_PCT (18%) so the robot always
+    // pauses when no white paper is present (or black paper covers it).
     double startBright = OpticalPaper.brightness();
-    if (startBright >= 15.0) {
+    paperThreshold = WHITE_PAPER_MIN_PCT;
+    if (startBright >= 35.0) {
         paperThreshold = startBright * 0.55;
-    } else {
-        paperThreshold = 0.0;
     }
 
     TouchStatus.on(blue);
     Brain.Screen.clearScreen();
     Brain.Screen.setCursor(1, 1);
-    Brain.Screen.print("v19 Ready Z:+%.0f", MotorZ.position(degrees));
+    Brain.Screen.print("v20 Ready Z:+%.0f", MotorZ.position(degrees));
     Brain.Screen.newLine();
     Brain.Screen.print("B:%.0f%% T:%.0f%%", startBright, paperThreshold);
     Brain.Screen.newLine();
@@ -322,10 +324,10 @@ bool homeAllAxes(double &calibratedPressDeg, double &paperThreshold,
     return true;
 }
 
-// Function 2: Polls TouchStatus (manual pause), OpticalPaper (paper-out
-// or cover/proximity), and DistanceBed (object closer than distThreshold).
-// Called before every dot slot; halts all 3 motors safely on trigger and
-// waits up to 25 s for recovery and TouchStatus (or Brain Check) resume.
+// Function 2: Polls TouchStatus (manual pause), OpticalPaper (requires
+// white paper >= paperThreshold), and DistanceBed (< distThreshold).
+// Called before every dot slot; halts all 3 motors safely on trigger,
+// updates live B/D readings while paused, and waits up to 25 s to resume.
 bool checkSafetyAndPaper(bool &isPaused, timer &jobTimer,
                          double paperThreshold, double distThreshold) {
     if (TouchStatus.pressing()) {
@@ -336,16 +338,7 @@ bool checkSafetyAndPaper(bool &isPaused, timer &jobTimer,
     }
 
     double optBright = OpticalPaper.brightness();
-    bool optNear = OpticalPaper.isNearObject();
-    bool paperMissing = false;
-    if (paperThreshold > 0.0) {
-        // Paper was bright at startup: pause if removed or dark-covered.
-        paperMissing = (optBright < paperThreshold);
-    } else {
-        // Sensor faced open air at startup: pause if ANY object/paper
-        // covers the optical sensor (proximity or brightness jump).
-        paperMissing = (optNear || optBright >= 25.0);
-    }
+    bool paperMissing = (optBright < paperThreshold);
 
     bool distObj = DistanceBed.isObjectDetected();
     double bedClearanceMm = DistanceBed.objectDistance(mm);
@@ -369,36 +362,37 @@ bool checkSafetyAndPaper(bool &isPaused, timer &jobTimer,
     Brain.Screen.clearScreen();
     Brain.Screen.setCursor(1, 1);
     if (paperMissing) {
-        Brain.Screen.print("PAUSED:Optical");
+        Brain.Screen.print("PAUSED:No Paper");
     } else if (obstructionDetected) {
         Brain.Screen.print("PAUSED:Distance");
     } else {
         Brain.Screen.print("PAUSED:User");
     }
-
-    Brain.Screen.newLine();
-    Brain.Screen.print("B:%.0f%% D:%.0fmm", optBright, bedClearanceMm);
-    Brain.Screen.newLine();
+    Brain.Screen.setCursor(3, 1);
     Brain.Screen.print("LED=Go Chk=Skip");
 
     timer pauseTimer;
     pauseTimer.clear();
     bool resumed = false;
+    int uiTicks = 0;
 
     while (pauseTimer.time(seconds) < 25.0 && !resumed) {
         double nowBright = OpticalPaper.brightness();
-        bool nowNear = OpticalPaper.isNearObject();
-        bool paperPresentNow = true;
-        if (paperThreshold > 0.0) {
-            paperPresentNow = (nowBright >= paperThreshold);
-        } else {
-            paperPresentNow = (!nowNear && nowBright < 25.0);
-        }
+        bool paperPresentNow = (nowBright >= paperThreshold);
 
         bool nowDistObj = DistanceBed.isObjectDetected();
         double currentClearance = DistanceBed.objectDistance(mm);
         bool pathClearNow =
             (!nowDistObj || currentClearance >= distThreshold);
+
+        // Refresh live Optical & Distance readings every ~200 ms.
+        if (uiTicks % 8 == 0) {
+            Brain.Screen.setCursor(2, 1);
+            Brain.Screen.print("B:%.0f/%.0f D:%.0f  ",
+                               nowBright, paperThreshold,
+                               currentClearance);
+        }
+        uiTicks++;
 
         bool ledResume =
             TouchStatus.pressing() && paperPresentNow && pathClearNow;
