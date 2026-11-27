@@ -210,12 +210,13 @@ const bool BRAILLE_ALPHABET[26][3][2] = {
 // motor current stall polling (without a top bumper switch), zeroes all
 // three motor encoders, leaves MotorFeed in coast for easy paper loading,
 // checks bed clearance, and calibrates Z stroke depth.
-bool homeAllAxes(double &calibratedPunchDeg) {
+bool homeAllAxes(double &calibratedPunchDeg, double &paperThreshold) {
     timer homingTimer;
     homingTimer.clear();
 
     TouchStatus.on(yellow);
     OpticalPaper.setLight(ledState::on);
+    OpticalPaper.setLightPower(100, percent);
 
     Brain.Screen.clearScreen();
     Brain.Screen.setCursor(1, 1);
@@ -249,10 +250,17 @@ bool homeAllAxes(double &calibratedPunchDeg) {
     MotorFeed.stop(coast);
     MotorFeed.setPosition(0, degrees);
 
+    // Auto-calibrate OpticalPaper brightness threshold from loaded paper.
+    double startBright = OpticalPaper.brightness();
+    if (startBright >= 5.0) {
+        paperThreshold = startBright * 0.5;
+    } else {
+        paperThreshold = 0.0;
+    }
+
     // Verify embossing zone is unobstructed and calibrate Z punch stroke.
     calibratedPunchDeg = DEFAULT_PUNCH_DEG;
     double measuredBedDist = DistanceBed.objectDistance(mm);
-    double startBright = OpticalPaper.brightness();
     if (measuredBedDist > 0.0 && measuredBedDist < OBSTRUCTION_MIN_MM) {
         TouchStatus.on(red);
         Brain.Screen.newLine();
@@ -273,8 +281,8 @@ bool homeAllAxes(double &calibratedPunchDeg) {
 
     TouchStatus.on(blue);
     Brain.Screen.newLine();
-    Brain.Screen.print("B:%.0f%% D:%.0f Z:%.0f",
-                       startBright, measuredBedDist, calibratedPunchDeg);
+    Brain.Screen.print("B:%.0f%% H:%.0f D:%.0f",
+                       startBright, OpticalPaper.hue(), measuredBedDist);
     wait(1000, msec);
     return true;
 }
@@ -282,7 +290,8 @@ bool homeAllAxes(double &calibratedPunchDeg) {
 // Function 2: Polls TouchStatus (manual pause), OpticalPaper (paper-out),
 // and DistanceBed (obstruction < 25 mm). Halts all 3 motors safely on a
 // trigger and waits up to 25 s for recovery and TouchStatus confirmation.
-bool checkSafetyAndPaper(bool &isPaused, timer &jobTimer) {
+bool checkSafetyAndPaper(bool &isPaused, timer &jobTimer,
+                         double paperThreshold) {
     if (TouchStatus.pressing()) {
         isPaused = true;
         while (TouchStatus.pressing()) {
@@ -290,10 +299,17 @@ bool checkSafetyAndPaper(bool &isPaused, timer &jobTimer) {
         }
     }
 
-    // Use optical brightness without isNearObject() since sensor sits
-    // ~45 mm above the paper strip on the Tetrix upright bracket.
+    // Check calibrated brightness threshold (or blue/red dark backing card
+    // fallback if sensor sits too high to return nonzero brightness).
     double optBright = OpticalPaper.brightness();
-    bool paperMissing = (optBright < PAPER_BRIGHTNESS_MIN);
+    bool paperMissing = false;
+    if (paperThreshold > 0.0) {
+        paperMissing = (optBright < paperThreshold);
+    } else {
+        color seenCol = OpticalPaper.color();
+        paperMissing = (seenCol == colorType::blue ||
+                        seenCol == colorType::red);
+    }
 
     double bedClearanceMm = DistanceBed.objectDistance(mm);
     bool obstructionDetected =
@@ -333,8 +349,14 @@ bool checkSafetyAndPaper(bool &isPaused, timer &jobTimer) {
     bool resumed = false;
 
     while (pauseTimer.time(seconds) < 25.0 && !resumed) {
-        bool paperPresentNow =
-            (OpticalPaper.brightness() >= PAPER_BRIGHTNESS_MIN);
+        bool paperPresentNow = true;
+        if (paperThreshold > 0.0) {
+            paperPresentNow = (OpticalPaper.brightness() >= paperThreshold);
+        } else {
+            color nowCol = OpticalPaper.color();
+            paperPresentNow = (nowCol != colorType::blue &&
+                               nowCol != colorType::red);
+        }
 
         double currentClearance = DistanceBed.objectDistance(mm);
         bool pathClearNow =
@@ -745,6 +767,7 @@ int main() {
     vexcodeInit();
 
     double calibratedPunchDeg = DEFAULT_PUNCH_DEG;
+    double paperThreshold = PAPER_BRIGHTNESS_MIN;
     char wordBuffer[MAX_WORD_LENGTH];
     bool wordCells[MAX_WORD_LENGTH][3][2];
     bool charValid[MAX_WORD_LENGTH];
@@ -753,7 +776,7 @@ int main() {
     int totalDotsPunched = 0;
     int validCharCount = 0;
 
-    if (!homeAllAxes(calibratedPunchDeg)) {
+    if (!homeAllAxes(calibratedPunchDeg, paperThreshold)) {
         executeCleanShutdown(0, 0, 0.0, true);
         return 0;
     }
@@ -782,7 +805,7 @@ int main() {
     // reversal backlash between dots and matches the linear hole plate.
     int row = 0;
     while (row < 3 && !systemFault) {
-        if (!checkSafetyAndPaper(isPaused, jobTimer)) {
+        if (!checkSafetyAndPaper(isPaused, jobTimer, paperThreshold)) {
             systemFault = true;
         }
 
