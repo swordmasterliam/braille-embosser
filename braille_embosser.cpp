@@ -25,9 +25,9 @@ brain Brain;
 
 // Robot configuration code.
 inertial BrainInertial = inertial();
-motor MotorFeed = motor(PORT9, false);
+motor MotorFeed = motor(PORT9, true);
 motor MotorX = motor(PORT10, false);
-motor MotorZ = motor(PORT7, false);
+motor MotorZ = motor(PORT7, true);
 optical OpticalPaper = optical(PORT12);
 distance DistanceBed = distance(PORT8);
 touchled TouchStatus = touchled(PORT11);
@@ -220,7 +220,7 @@ bool homeAllAxes(double &calibratedPunchDeg, double &paperThreshold) {
 
     Brain.Screen.clearScreen();
     Brain.Screen.setCursor(1, 1);
-    Brain.Screen.print("v6 Homing Z...");
+    Brain.Screen.print("v7 Homing Z...");
 
     // Gently snug Z-axis stylus upward (start with pusher raised to max)
     // using a short 400 ms guard so the rack never runs off the 60T gear.
@@ -237,7 +237,7 @@ bool homeAllAxes(double &calibratedPunchDeg, double &paperThreshold) {
     // Checks actual shaft velocity (< 2 rpm) + current (>= 1.15 A) after
     // 350 ms so brief chain friction mid-rail never stops homing early.
     Brain.Screen.newLine();
-    Brain.Screen.print("v6 Homing X...");
+    Brain.Screen.print("v7 Homing X...");
     homingTimer.clear();
     MotorX.spin(forward, 22, percent);
     while (homingTimer.time(msec) < 6000 &&
