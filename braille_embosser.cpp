@@ -97,7 +97,7 @@ void vexcodeInit() {
 
 /*
  * MTE 100 / MTE 121 Design Project - Group 28
- * Automated Desktop Braille Embosser Control Firmware (v13 - Bottom-Zero Z)
+ * Automated Desktop Braille Embosser Control Firmware (v14 - Relative Z)
  *
  * Team Members:
  *   - Joseph Lu         : homeAllAxes, checkSafetyAndPaper
@@ -108,8 +108,8 @@ void vexcodeInit() {
  *
  * Mechanical Configuration (Final Revision - Tetrix Prime):
  *   - Row-by-row horizontal embossing across the word (Row 0 -> 1 -> 2)
- *   - Bottom-zero Z homing: start all the way DOWN (0 deg), lift ~1 cm
- *     (+20 deg), home X all the way to the motor side, then step dot by dot
+ *   - Relative Z stroke: start at bottom, lift ONLY ~1 cm (+18 deg) before
+ *     X homes to motor side, press down slowly, lift strictly +18 deg up
  *   - PORT9  (MotorFeed)   : Single Y-axis roller axle (2x 200 mm wheels)
  *   - PORT10 (MotorX)      : 16T VEX IQ sprocket + 6.35 mm chain
  *   - PORT7  (MotorZ)      : Spur gear + vertical rack stylus into
@@ -156,20 +156,18 @@ const double EJECT_FEED_DEG       = (EJECT_FEED_MM / Y_MM_PER_REV) * 360.0;
 // Anti-backlash approach overshoot when returning left on VEX chain (deg).
 const double X_BACKLASH_DEG       = 8.0;
 
-// Z-axis bottom-zero parameters (start with stylus ALL THE WAY DOWN):
-//   0 deg         = bottom contact on paper / base plate indent
-//   +Z_LIFT_DEG   = short ~1 cm upward lift (+20 deg on 60T gear)
-//   -Z_PRESS_DEG  = slow, full-torque downward press past 0 into die
-const double Z_LIFT_DEG           = 20.0;  // ~1 cm upward lift (deg)
+// Z-axis relative-stroke parameters (start with stylus ALL THE WAY DOWN):
+//   Every lift moves strictly +Z_LIFT_DEG (+18 deg = ~1 cm on 60T gear)
+//   above the actual bottom position so the rack can NEVER creep higher.
+const double Z_LIFT_DEG           = 18.0;  // Strictly ~1 cm lift (deg)
 const double Z_MIN_CLEAR_DEG      = 8.0;   // Minimum lift to clear paper
-const double Z_PRESS_OVERDRIVE    = 18.0;  // Firm press past bottom 0 (deg)
+const double Z_PRESS_OVERDRIVE    = 10.0;  // Max extra down past lift (deg)
 const double POS_TOLERANCE_DEG    = 0.5;   // Tight X/Y precision window
-const double STALL_CURRENT_AMP    = 1.25;  // X/Y jam detection current
+const double STALL_CURRENT_AMP    = 1.25;  // X/Y/Z-lift stall current
 const double X_HOMING_STALL_AMP   = 1.40;  // Sustained X end-stop current
-const double Z_PUNCH_CURRENT_AMP  = 1.75;  // High Z embossing force current
-const double HOMING_STALL_AMP     = 0.85;  // Gentle Z lift/snug current
+const double Z_PUNCH_CURRENT_AMP  = 1.60;  // High Z embossing seating amp
 const double OBSTRUCTION_MIN_MM   = 25.0;  // Minimum safe bed clearance
-const int    PUNCH_DWELL_MSEC     = 400;   // Active-press dwell time (ms)
+const int    PUNCH_DWELL_MSEC     = 350;   // Hold-at-bottom dwell (ms)
 const int    Z_POST_LIFT_PAUSE_MS = 150;   // Wait 150 ms AFTER reaching top
 const int    MAX_WORD_LENGTH      = 16;    // Max queued chars per job
 const bool   MIRROR_COLUMNS_FOR_DOWNWARD_PUNCH = false;
@@ -218,10 +216,10 @@ const bool BRAILLE_ALPHABET[26][3][2] = {
 // Author: Joseph Lu
 // =========================================================================
 
-// Function 1: Bottom-zero Z calibration (start with stylus ALL THE WAY
-// DOWN), lifts Z gently ~1 cm (+20 deg), pauses 150 ms, homes X ALL THE
-// WAY to the motor-side stop using sustained-stall detection, checks
-// DistanceBed clearance, and calibrates OpticalPaper brightness.
+// Function 1: Zeroes Z at the bottom start position, lifts Z strictly
+// ~1 cm (+18 deg) and pauses 150 ms BEFORE homing X all the way to the
+// motor-side stop via sustained-stall detection, checks DistanceBed
+// clearance, and calibrates OpticalPaper brightness.
 bool homeAllAxes(double &calibratedPressDeg, double &paperThreshold) {
     timer homingTimer;
     homingTimer.clear();
@@ -234,43 +232,33 @@ bool homeAllAxes(double &calibratedPressDeg, double &paperThreshold) {
 
     Brain.Screen.clearScreen();
     Brain.Screen.setCursor(1, 1);
-    Brain.Screen.print("v13 Zeroing Z...");
+    Brain.Screen.print("v14 Lift Z ~1cm");
 
-    // 1. Gently snug Z downward (start with stylus all the way down) and
-    // define 0.0 deg as exact paper / base plate bottom contact.
-    MotorZ.spin(reverse, 15, percent);
-    while (homingTimer.time(msec) < 200 &&
-           (homingTimer.time(msec) < 100 ||
-            MotorZ.current(amp) < HOMING_STALL_AMP)) {
-        wait(10, msec);
-    }
+    // 1. Start with stylus resting at the bottom; zero encoder cleanly
+    // without jamming downward, then lift strictly +18 deg (~1 cm) BEFORE
+    // X calibrates so the stylus is raised clear of the plate.
     MotorZ.stop(hold);
     MotorZ.setPosition(0, degrees);
-    wait(60, msec); // Allow VEX IQ smart-port encoder reset to register.
+    wait(50, msec);
     calibratedPressDeg = Z_PRESS_OVERDRIVE;
 
-    // 2. Lift Z gently upward ~1 cm (+20 deg) and pause 150 ms AFTER it
-    // reaches the top so the stylus clears paper cleanly before X moves.
-    Brain.Screen.newLine();
-    Brain.Screen.print("v13 Lift Z ~1cm");
     homingTimer.clear();
-    MotorZ.setMaxTorque(45, percent);
+    MotorZ.setMaxTorque(70, percent);
     MotorZ.spin(forward, 20, percent);
     while (MotorZ.position(degrees) < Z_LIFT_DEG &&
            homingTimer.time(msec) < 1500 &&
            (homingTimer.time(msec) < 150 ||
-            MotorZ.current(amp) < HOMING_STALL_AMP)) {
+            MotorZ.current(amp) < STALL_CURRENT_AMP)) {
         wait(5, msec);
     }
     MotorZ.stop(hold);
     MotorZ.setMaxTorque(100, percent);
-    wait(Z_POST_LIFT_PAUSE_MS, msec); // Wait 150 ms after reaching top.
+    wait(Z_POST_LIFT_PAUSE_MS, msec); // Wait 150 ms AFTER reaching top.
 
-    // 3. Home X-axis carriage ALL THE WAY to the motor-side physical stop
-    // using sustained stall (180 ms continuous) so chain drag never stops
-    // homing early.
+    // 2. With Z raised ~1 cm, home X-axis carriage ALL THE WAY to the
+    // motor-side physical stop using sustained stall (180 ms continuous).
     Brain.Screen.newLine();
-    Brain.Screen.print("v13 Homing X...");
+    Brain.Screen.print("v14 Homing X...");
     homingTimer.clear();
     MotorX.spin(forward, 30, percent);
     int stallCount = 0;
@@ -315,7 +303,7 @@ bool homeAllAxes(double &calibratedPressDeg, double &paperThreshold) {
     TouchStatus.on(blue);
     Brain.Screen.clearScreen();
     Brain.Screen.setCursor(1, 1);
-    Brain.Screen.print("v13 Ready!");
+    Brain.Screen.print("v14 Ready!");
     Brain.Screen.newLine();
     Brain.Screen.print("Z:+%.0f B:%.0f%%",
                        MotorZ.position(degrees), startBright);
@@ -639,52 +627,57 @@ bool moveCarriageToColumn(int charIdx, int dotCol, double colZeroDeg,
     return !stalled;
 }
 
-// Function 6: Pushes the Z-axis stylus SLOWLY down at full 100% max torque
-// into the die indent, keeps steady downward pressure during dwellTimeMsec
-// to form a crisp tactile dot, then lifts gently ~1 cm (+20 deg) and waits
-// 150 ms AFTER reaching the top BEFORE X moves to the next column.
+// Function 6: Pushes the Z-axis stylus SLOWLY down at full 100% torque
+// relative to topPos (max Z_LIFT_DEG + pressOverdriveDeg or 1.60 A),
+// holds firmly at bottom without spinning/skipping rack teeth, then lifts
+// strictly +Z_LIFT_DEG (+18 deg = ~1 cm) relative to actual bottomPos and
+// waits 150 ms AFTER reaching the top BEFORE X moves sideways.
 bool punchBrailleDot(double pressOverdriveDeg, int dwellTimeMsec) {
     timer strokeTimer;
     strokeTimer.clear();
 
+    double topPos = MotorZ.position(degrees);
+    double maxDownTravel = Z_LIFT_DEG + pressOverdriveDeg;
+
     // Slow, high-force downward embossing stroke (25% speed, 100% torque).
     MotorZ.setMaxTorque(100, percent);
     MotorZ.spin(reverse, 25, percent);
-    while (MotorZ.position(degrees) > -pressOverdriveDeg &&
+    while ((topPos - MotorZ.position(degrees)) < maxDownTravel &&
            strokeTimer.time(msec) < 1500 &&
-           (strokeTimer.time(msec) < 200 ||
+           (strokeTimer.time(msec) < 150 ||
             MotorZ.current(amp) < Z_PUNCH_CURRENT_AMP)) {
         wait(5, msec);
     }
+    MotorZ.stop(hold);
 
-    // Maintain slow, full-torque downward pressure during dwell so paper
-    // fibers deform deeply into the indent instead of springing back.
-    MotorZ.spin(reverse, 20, percent);
+    // Hold full 100% torque at bottom without driving motor further so
+    // paper forms a crisp bump and gear teeth never slip on the rack.
     timer dwellTimer;
     dwellTimer.clear();
     while (dwellTimer.time(msec) < dwellTimeMsec) {
         wait(5, msec);
     }
-    MotorZ.stop(hold);
-    wait(60, msec); // Release downward gear preload before lifting gently.
 
-    // Lift stylus gently back up ~1 cm (+20 deg) at reduced upward torque,
-    // then wait 150 ms AFTER reaching the top before X moves sideways.
+    // Measure actual physical bottom angle and lift STRICTLY +18 deg
+    // (~1 cm) above it so the stylus can NEVER creep higher dot-to-dot.
+    double bottomPos = MotorZ.position(degrees);
+    double liftTarget = bottomPos + Z_LIFT_DEG;
+
     strokeTimer.clear();
-    MotorZ.setMaxTorque(45, percent);
+    MotorZ.setMaxTorque(70, percent);
     MotorZ.spin(forward, 20, percent);
-    while (MotorZ.position(degrees) < Z_LIFT_DEG &&
+    while (MotorZ.position(degrees) < liftTarget &&
            strokeTimer.time(msec) < 1500 &&
            (strokeTimer.time(msec) < 150 ||
-            MotorZ.current(amp) < HOMING_STALL_AMP)) {
+            MotorZ.current(amp) < STALL_CURRENT_AMP)) {
         wait(5, msec);
     }
     MotorZ.stop(hold);
     MotorZ.setMaxTorque(100, percent);
     wait(Z_POST_LIFT_PAUSE_MS, msec); // Wait 150 ms AFTER reaching top.
 
-    // Fail only if Z genuinely failed to clear the paper (< 8 deg lift).
-    return (MotorZ.position(degrees) >= Z_MIN_CLEAR_DEG);
+    // Fail only if Z genuinely failed to lift at least 8 deg off bottom.
+    return ((MotorZ.position(degrees) - bottomPos) >= Z_MIN_CLEAR_DEG);
 }
 
 // =========================================================================
@@ -772,14 +765,16 @@ void executeCleanShutdown(int totalCharsEmbossed, int totalDotsPunched,
     timer shutdownTimer;
     shutdownTimer.clear();
 
-    // Ensure Z-axis stylus is lifted gently to +Z_LIFT_DEG before eject.
-    if (MotorZ.position(degrees) < Z_LIFT_DEG) {
-        MotorZ.setMaxTorque(45, percent);
+    // Z is already held ~1 cm above paper unless FAULT_Z_LIFT occurred;
+    // only perform a relative +18 deg lift if Z failed to clear.
+    if (faultCode == FAULT_Z_LIFT) {
+        double liftTarget = MotorZ.position(degrees) + Z_LIFT_DEG;
+        MotorZ.setMaxTorque(70, percent);
         MotorZ.spin(forward, 20, percent);
-        while (MotorZ.position(degrees) < Z_LIFT_DEG &&
-               shutdownTimer.time(msec) < 2000 &&
-               (shutdownTimer.time(msec) < 200 ||
-                MotorZ.current(amp) < HOMING_STALL_AMP)) {
+        while (MotorZ.position(degrees) < liftTarget &&
+               shutdownTimer.time(msec) < 1500 &&
+               (shutdownTimer.time(msec) < 150 ||
+                MotorZ.current(amp) < STALL_CURRENT_AMP)) {
             wait(10, msec);
         }
     }
