@@ -23,19 +23,7 @@ brain Brain;
   for (int iterator = 0; iterator < iterations; iterator++)
 // END IQ MACROS
 
-// Robot hardware port configuration (4 motors, 3 peripheral sensors +
-// built-in encoders, Brain buttons, and VEX Controller).
-// NOTE: Flip the second arg of MotorFeedOut to true if the exit roller
-// motor is mounted facing the opposite side of the Tetrix frame.
 inertial BrainInertial = inertial();
-motor MotorFeedIn = motor(PORT1, false);
-motor MotorX = motor(PORT2, false);
-motor MotorZ = motor(PORT3, false);
-motor MotorFeedOut = motor(PORT4, false);
-optical OpticalPaper = optical(PORT5);
-distance DistanceBed = distance(PORT6);
-touchled TouchStatus = touchled(PORT8);
-controller Controller = controller();
 
 // Generates and sets the random seed using inertial accelerometer data.
 void initializeRandomSeed() {
@@ -99,6 +87,16 @@ void vexcodeInit() {
 
 #pragma endregion VEXcode Generated Robot Configuration
 
+// Hardware port declarations kept OUTSIDE the VEXcode #pragma region so
+// VEXcode IQ never deletes them when opening or saving the project.
+motor MotorFeed = motor(PORT1, false);
+motor MotorX = motor(PORT2, false);
+motor MotorZ = motor(PORT3, false);
+optical OpticalPaper = optical(PORT5);
+distance DistanceBed = distance(PORT6);
+touchled TouchStatus = touchled(PORT8);
+controller Controller = controller();
+
 /*
  * MTE 100 / MTE 121 Design Project - Group 28
  * Automated Desktop Braille Embosser Control Firmware
@@ -112,13 +110,12 @@ void vexcodeInit() {
  *
  * Mechanical Configuration (Final Revision - Tetrix Prime):
  *   - Tetrix Prime aluminum frame with 3D-printed bearing-guided carriage
- *   - PORT1 (MotorFeedIn) : Entrance Y-axis roller (pulls strip in)
- *   - PORT2 (MotorX)      : Lowered VEX IQ belt drive with VEX sprocket
- *   - PORT3 (MotorZ)      : 60-tooth spur gear & vertical rack stylus into
- *                           3D-printed base plate with pre-made indents
- *                           (encoder + stall-stop homing replaces bumper)
- *   - PORT4 (MotorFeedOut): Exit Y-axis roller (tensions strip with PORT1
- *                           in active hold, replacing clamp, & ejects out)
+ *   - PORT1 (MotorFeed)   : Single Y-axis roller axle (2x 200 mm VEX IQ
+ *                           travel wheels); active hold secures paper
+ *   - PORT2 (MotorX)      : 16T VEX IQ sprocket (6.35 mm pitch chain,
+ *                           101.6 mm/rev) driving bearing carriage
+ *   - PORT3 (MotorZ)      : 60T blue spur gear & vertical rack stylus into
+ *                           3D-printed BrailleBasePlate (pre-made indents)
  *   - PORT5 (OpticalPaper): Paper presence / brightness sensor
  *   - PORT6 (DistanceBed) : Bed height calibration & obstruction interlock
  *   - PORT8 (TouchStatus) : User Start/Pause input & RGB status indicator
@@ -126,17 +123,45 @@ void vexcodeInit() {
 
 #include <cmath>
 
-// Calibration and safety constants (read-only; no mutable globals).
-const double COL_ZERO_DEG         = 35.0;  // Left Braille column (deg)
-const double COL_ONE_DEG          = 80.0;  // Right Braille column (deg)
-const double LOAD_FEED_DEG        = 90.0;  // Initial pull-in (0 if pre-set)
-const double ROW_FEED_DEG         = 45.0;  // 2.5 mm dot-row paper feed
-const double CHAR_GAP_FEED_DEG    = 90.0;  // 5.0 mm inter-character gap
-const double EJECT_FEED_DEG       = 540.0; // Exit-roller ejection rotation
+// =========================================================================
+// Physical Geometry & Calibration Constants (read-only; no mutable globals)
+// =========================================================================
+// TUNE THESE TWO VALUES FIRST IF HOLES ARE STILL OFFSET:
+//   1. COL_ZERO_MM  : Ruler distance (mm) from X home stop to Hole 0 center
+//   2. DOT_PITCH_MM : Center-to-center hole pitch (2.5 mm standard Braille;
+//                     change to 25.0 if your 3D plate uses 2.5 cm spacing)
+const double DOT_PITCH_MM         = 2.5;   // Center-to-center pitch (mm)
+const double COL_ZERO_MM          = 10.0;  // X home stop -> Hole 0 (mm)
+const double CHAR_GAP_MM          = 5.0;   // Inter-character Y gap (mm)
+const double LOAD_FEED_MM         = 0.0;   // Startup feed-in (mm)
+const double EJECT_FEED_MM        = 120.0; // Ejection travel (mm)
+
+// Exact VEX IQ drive kinematics from physical hardware:
+//   X: 16-tooth VEX IQ sprocket (228-2500-233) * 6.35 mm chain = 101.6 mm
+//   Y: VEX IQ 200 mm travel wheel (1:1 direct axle)            = 200.0 mm
+const double X_MM_PER_REV         = 101.6;
+const double Y_MM_PER_REV         = 200.0;
+
+// Derived encoder angle targets (degrees):
+//   At 2.5 mm pitch: X step = 8.86 deg, Y row = 4.50 deg, Y gap = 9.00 deg
+const double COL_ZERO_DEG         = (COL_ZERO_MM / X_MM_PER_REV) * 360.0;
+const double COL_ONE_DEG          =
+    ((COL_ZERO_MM + DOT_PITCH_MM) / X_MM_PER_REV) * 360.0;
+const double LOAD_FEED_DEG        = (LOAD_FEED_MM / Y_MM_PER_REV) * 360.0;
+const double ROW_FEED_DEG         = (DOT_PITCH_MM / Y_MM_PER_REV) * 360.0;
+const double CHAR_GAP_FEED_DEG    = (CHAR_GAP_MM / Y_MM_PER_REV) * 360.0;
+const double EJECT_FEED_DEG       = (EJECT_FEED_MM / Y_MM_PER_REV) * 360.0;
+
+// Anti-backlash approach overshoot when returning left on VEX chain (deg).
+// Ensures both Col 0 and Col 1 are always approached from the left side.
+const double X_BACKLASH_DEG       = 8.0;
+
+// Punch, tolerance, speed, and safety thresholds.
 const double DEFAULT_PUNCH_DEG    = 115.0; // Nominal Z-axis punch stroke
 const double MIN_PUNCH_DEG        = 100.0; // Minimum calibrated Z stroke
 const double MAX_PUNCH_DEG        = 130.0; // Maximum calibrated Z stroke
-const double POS_TOLERANCE_DEG    = 2.5;   // Closed-loop encoder window
+const double POS_TOLERANCE_DEG    = 0.5;   // Tight X/Y precision window
+const double Z_HOME_TOLERANCE_DEG = 2.0;   // Z top-return tolerance
 const double STALL_CURRENT_AMP    = 1.15;  // Jam threshold during motion
 const double HOMING_STALL_AMP     = 0.80;  // Hard-stop homing threshold
 const double PAPER_BRIGHTNESS_MIN = 30.0;  // Optical paper threshold (%)
@@ -183,8 +208,8 @@ const bool BRAILLE_ALPHABET[26][3][2] = {
 
 // Function 1: Homes Z-axis and X-axis against mechanical end-stops using
 // motor current stall polling (without a top bumper switch), zeroes all
-// four motor encoders, releases entrance/exit rollers to coast for easy
-// paper loading, checks bed clearance, and calibrates Z stroke depth.
+// three motor encoders, leaves MotorFeed in coast for easy paper loading,
+// checks bed clearance, and calibrates Z stroke depth.
 bool homeAllAxes(double &calibratedPunchDeg) {
     timer homingTimer;
     homingTimer.clear();
@@ -213,10 +238,10 @@ bool homeAllAxes(double &calibratedPunchDeg) {
         MotorZ.setPosition(0, degrees);
     }
 
-    // Home X-axis bearing carriage to left end-stop via VEX belt drive.
+    // Home X-axis bearing carriage to left end-stop via VEX chain drive.
     if (MotorX.installed()) {
         homingTimer.clear();
-        MotorX.spin(forward, 15, percent);
+        MotorX.spin(forward, 12, percent);
         while (homingTimer.time(msec) < 4000 &&
                (homingTimer.time(msec) < 150 ||
                 MotorX.current(amp) < HOMING_STALL_AMP)) {
@@ -226,13 +251,9 @@ bool homeAllAxes(double &calibratedPunchDeg) {
         MotorX.setPosition(0, degrees);
     }
 
-    // Leave entrance (PORT1) & exit (PORT4) rollers in coast for loading.
-    MotorFeedIn.stop(coast);
-    MotorFeedIn.setPosition(0, degrees);
-    if (MotorFeedOut.installed()) {
-        MotorFeedOut.stop(coast);
-        MotorFeedOut.setPosition(0, degrees);
-    }
+    // Leave single Y-axis roller axle (PORT1) in coast for easy loading.
+    MotorFeed.stop(coast);
+    MotorFeed.setPosition(0, degrees);
 
     // Verify embossing zone is unobstructed and calibrate Z punch stroke.
     calibratedPunchDeg = DEFAULT_PUNCH_DEG;
@@ -268,7 +289,7 @@ bool homeAllAxes(double &calibratedPunchDeg) {
 }
 
 // Function 2: Polls TouchStatus (manual pause), OpticalPaper (paper-out),
-// and DistanceBed (obstruction < 25 mm). Halts all 4 motors safely on a
+// and DistanceBed (obstruction < 25 mm). Halts all 3 motors safely on a
 // trigger and waits up to 25 s for recovery and TouchStatus confirmation.
 bool checkSafetyAndPaper(bool &isPaused, timer &jobTimer) {
     if (TouchStatus.installed() && TouchStatus.pressing()) {
@@ -300,12 +321,9 @@ bool checkSafetyAndPaper(bool &isPaused, timer &jobTimer) {
         return true;
     }
 
-    // Enter safe pause state: brake X, hold Z and both feed rollers.
+    // Enter safe pause state: brake X, hold Z and feed roller.
     MotorX.stop(brake);
-    MotorFeedIn.stop(hold);
-    if (MotorFeedOut.installed()) {
-        MotorFeedOut.stop(hold);
-    }
+    MotorFeed.stop(hold);
     MotorZ.stop(hold);
     if (TouchStatus.installed()) {
         TouchStatus.on(yellow);
@@ -490,13 +508,14 @@ void updateLiveTelemetry(char currentChar, int charIndex, int totalChars,
 }
 
 // =========================================================================
-// Section 3: X-Axis Belt Carriage and Z-Axis Rack-and-Pinion Punch Control
+// Section 3: X-Axis Chain Carriage and Z-Axis Rack-and-Pinion Punch Control
 // Author: Nicholas Chan
 // =========================================================================
 
 // Function 5: Positions the bearing-guided X-axis carriage at Column 0 or
-// Column 1 via the lowered VEX IQ belt drive, monitoring encoder target,
-// 150 ms inrush-masked stall current, and a 2000 ms safety timeout.
+// Column 1 via the 16T VEX IQ sprocket and chain drive within 0.5 deg.
+// Uses single-direction anti-backlash approach when moving left so VEX
+// chain slack never offsets the stylus from the 2.5 mm die holes.
 bool moveCarriageToColumn(int colIndex, double colZeroDeg,
                           double colOneDeg) {
     int effectiveCol = colIndex;
@@ -514,9 +533,16 @@ bool moveCarriageToColumn(int colIndex, double colZeroDeg,
     bool stalled = false;
     double currentDeg = -MotorX.position(degrees);
 
-    if (targetDeg > currentDeg + POS_TOLERANCE_DEG) {
-        MotorX.spin(reverse, 15, percent);
-        while (-MotorX.position(degrees) < targetDeg - POS_TOLERANCE_DEG &&
+    // If moving left (decreasing angle), overshoot past target by
+    // X_BACKLASH_DEG (clamped >= 0) so the final approach is always
+    // from the same tensioned side of the VEX chain.
+    if (targetDeg < currentDeg - POS_TOLERANCE_DEG) {
+        double preTarget = targetDeg - X_BACKLASH_DEG;
+        if (preTarget < 0.0) {
+            preTarget = 0.0;
+        }
+        MotorX.spin(forward, 8, percent);
+        while (-MotorX.position(degrees) > preTarget + POS_TOLERANCE_DEG &&
                !stalled) {
             if ((moveTimer.time(msec) > 150 &&
                  MotorX.current(amp) > STALL_CURRENT_AMP) ||
@@ -525,9 +551,16 @@ bool moveCarriageToColumn(int colIndex, double colZeroDeg,
             }
             wait(5, msec);
         }
-    } else if (targetDeg < currentDeg - POS_TOLERANCE_DEG) {
-        MotorX.spin(forward, 15, percent);
-        while (-MotorX.position(degrees) > targetDeg + POS_TOLERANCE_DEG &&
+        MotorX.stop(hold);
+        wait(40, msec);
+        currentDeg = -MotorX.position(degrees);
+        moveTimer.clear();
+    }
+
+    // Final low-speed approach moving right (reverse spin) into target.
+    if (!stalled && targetDeg > currentDeg + POS_TOLERANCE_DEG) {
+        MotorX.spin(reverse, 8, percent);
+        while (-MotorX.position(degrees) < targetDeg - POS_TOLERANCE_DEG &&
                !stalled) {
             if ((moveTimer.time(msec) > 150 &&
                  MotorX.current(amp) > STALL_CURRENT_AMP) ||
@@ -569,7 +602,7 @@ bool punchBrailleDot(double targetDepthDeg, int dwellTimeMsec) {
     strokeTimer.clear();
     bool hitTopStop = false;
     MotorZ.spin(forward, 12, percent);
-    while (-MotorZ.position(degrees) > POS_TOLERANCE_DEG &&
+    while (-MotorZ.position(degrees) > Z_HOME_TOLERANCE_DEG &&
            strokeTimer.time(msec) < 1800 && !hitTopStop) {
         if (strokeTimer.time(msec) > 150 &&
             MotorZ.current(amp) >= HOMING_STALL_AMP) {
@@ -583,11 +616,11 @@ bool punchBrailleDot(double targetDepthDeg, int dwellTimeMsec) {
         MotorZ.setPosition(0, degrees);
         return true;
     }
-    return (-MotorZ.position(degrees) <= POS_TOLERANCE_DEG);
+    return (-MotorZ.position(degrees) <= Z_HOME_TOLERANCE_DEG);
 }
 
 // =========================================================================
-// Section 4: Braille Lookup, Entrance/Exit Roller Feed, and Clean Shutdown
+// Section 4: Braille Lookup, Single-Roller Paper Feed, and Clean Shutdown
 // Author: Liam McCarthy
 // =========================================================================
 
@@ -626,58 +659,29 @@ bool getCharDotMatrix(char letter, bool cellMatrix[3][2]) {
     return true;
 }
 
-// Function 8: Synchronously drives the entrance roller (PORT1) and exit
-// roller (PORT4) by feedDegrees with independent encoder stops and 150 ms
-// inrush-masked jam detection on both motors. When holdAfterFeed is true,
-// both rollers lock in hold mode to tension the strip flat over the die
-// plate without a mechanical clamp; when false, both rollers coast freely.
+// Function 8: Advances the paper strip via the single Y-axis roller axle
+// (PORT1, 2x 200 mm VEX travel wheels) by feedDegrees within 0.5 deg with
+// 150 ms inrush-masked jam detection. Uses slow speed (10%) on short dot
+// steps to avoid overshoot and 25% on long ejection moves. Locks in hold
+// mode during punching when holdAfterFeed is true, or coasts when false.
 bool advancePaperStrip(double feedDegrees, bool holdAfterFeed) {
-    bool useIn = MotorFeedIn.installed();
-    bool useOut = MotorFeedOut.installed();
-
-    if (feedDegrees > 0.0 && (useIn || useOut)) {
-        double targetIn = MotorFeedIn.position(degrees) + feedDegrees;
-        double targetOut = MotorFeedOut.position(degrees) + feedDegrees;
-        bool inDone = !useIn;
-        bool outDone = !useOut;
-        double maxFeedMs = 1500.0 + feedDegrees * 8.0;
+    if (feedDegrees > 0.0 && MotorFeed.installed()) {
+        double targetY = MotorFeed.position(degrees) + feedDegrees;
+        int feedSpeed = 10;
+        if (feedDegrees > 45.0) {
+            feedSpeed = 25;
+        }
+        double maxFeedMs = 1500.0 + feedDegrees * 12.0;
 
         timer feedTimer;
         feedTimer.clear();
 
-        if (!inDone) {
-            MotorFeedIn.spin(forward, 25, percent);
-        }
-        if (!outDone) {
-            MotorFeedOut.spin(forward, 25, percent);
-        }
-
-        while ((!inDone || !outDone) &&
+        MotorFeed.spin(forward, feedSpeed, percent);
+        while (MotorFeed.position(degrees) < targetY - POS_TOLERANCE_DEG &&
                feedTimer.time(msec) < maxFeedMs) {
-            if (!inDone &&
-                MotorFeedIn.position(degrees) >=
-                    targetIn - POS_TOLERANCE_DEG) {
-                MotorFeedIn.stop(hold);
-                inDone = true;
-            }
-            if (!outDone &&
-                MotorFeedOut.position(degrees) >=
-                    targetOut - POS_TOLERANCE_DEG) {
-                MotorFeedOut.stop(hold);
-                outDone = true;
-            }
-
-            bool inJam =
-                (!inDone && MotorFeedIn.current(amp) > STALL_CURRENT_AMP);
-            bool outJam =
-                (!outDone &&
-                 MotorFeedOut.current(amp) > STALL_CURRENT_AMP);
-
-            if (feedTimer.time(msec) > 150 && (inJam || outJam)) {
-                MotorFeedIn.stop(brake);
-                if (useOut) {
-                    MotorFeedOut.stop(brake);
-                }
+            if (feedTimer.time(msec) > 150 &&
+                MotorFeed.current(amp) > STALL_CURRENT_AMP) {
+                MotorFeed.stop(brake);
                 return false;
             }
             wait(5, msec);
@@ -685,23 +689,17 @@ bool advancePaperStrip(double feedDegrees, bool holdAfterFeed) {
     }
 
     if (holdAfterFeed) {
-        MotorFeedIn.stop(hold);
-        if (useOut) {
-            MotorFeedOut.stop(hold);
-        }
+        MotorFeed.stop(hold);
     } else {
-        MotorFeedIn.stop(coast);
-        if (useOut) {
-            MotorFeedOut.stop(coast);
-        }
+        MotorFeed.stop(coast);
     }
     return true;
 }
 
 // Function 9: Executes a safe non-abort shutdown. Retracts Z-axis punch,
-// drives the completed strip out via entrance & exit rollers (unless a
-// fault occurred), parks X-axis at 0 deg, sets all 4 motors to coast,
-// displays job stats, and terminates cleanly via Brain.programStop().
+// ejects the completed strip via MotorFeed (unless a fault occurred),
+// parks X-axis at 0 deg, sets all 3 motors to coast, displays job stats,
+// and terminates cleanly via Brain.programStop().
 void executeCleanShutdown(int totalCharsEmbossed, int totalDotsPunched,
                           double totalTimeSec, bool faultOccurred) {
     timer shutdownTimer;
@@ -710,7 +708,7 @@ void executeCleanShutdown(int totalCharsEmbossed, int totalDotsPunched,
     // Ensure Z-axis stylus is safely retracted before moving paper or X.
     if (MotorZ.installed()) {
         MotorZ.spin(forward, 12, percent);
-        while (-MotorZ.position(degrees) > POS_TOLERANCE_DEG &&
+        while (-MotorZ.position(degrees) > Z_HOME_TOLERANCE_DEG &&
                shutdownTimer.time(msec) < 1500 &&
                (shutdownTimer.time(msec) < 150 ||
                 MotorZ.current(amp) < HOMING_STALL_AMP)) {
@@ -731,11 +729,8 @@ void executeCleanShutdown(int totalCharsEmbossed, int totalDotsPunched,
         moveCarriageToColumn(0, 0.0, COL_ONE_DEG);
     }
 
-    // De-energize all 4 motors and optical LED for safe handling.
-    MotorFeedIn.stop(coast);
-    if (MotorFeedOut.installed()) {
-        MotorFeedOut.stop(coast);
-    }
+    // De-energize all 3 motors and optical LED for safe handling.
+    MotorFeed.stop(coast);
     MotorX.stop(coast);
     MotorZ.stop(coast);
     if (OpticalPaper.installed()) {
@@ -795,7 +790,7 @@ int main() {
         TouchStatus.on(green);
     }
 
-    // Pull strip in from entrance roller and lock entrance & exit rollers.
+    // Lock single feed roller in hold mode (and feed lead-in if set).
     if (!advancePaperStrip(LOAD_FEED_DEG, true)) {
         systemFault = true;
     }
