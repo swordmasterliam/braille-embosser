@@ -97,7 +97,7 @@ void vexcodeInit() {
 
 /*
  * MTE 100 / MTE 121 Design Project - Group 28
- * Automated Desktop Braille Embosser Control Firmware (v17 - Stall Punch)
+ * Automated Desktop Braille Embosser Control Firmware (v18 - Sensor Fix)
  *
  * Team Members:
  *   - Joseph Lu         : homeAllAxes, checkSafetyAndPaper
@@ -166,7 +166,8 @@ const double POS_TOLERANCE_DEG    = 0.5;   // Tight X/Y precision window
 const double STALL_CURRENT_AMP    = 1.25;  // X/Y/Z-lift stall current
 const double X_HOMING_STALL_AMP   = 1.40;  // Sustained X end-stop current
 const double Z_PUNCH_STALL_AMP    = 1.85;  // Max downward stall current
-const double OBSTRUCTION_MIN_MM   = 25.0;  // Minimum safe bed clearance
+const double OBSTRUCTION_MIN_MM   = 80.0;  // Default obstruction range (mm)
+const double STARTUP_BLOCK_MM     = 20.0;  // Startup blocked limit (mm)
 const int    PUNCH_SQUEEZE_MSEC   = 150;   // Active bottom squeeze (ms)
 const int    PUNCH_DWELL_MSEC     = 250;   // Hold-at-bottom dwell (ms)
 const int    Z_POST_LIFT_PAUSE_MS = 450;   // Pause at top before X (3x)
@@ -218,10 +219,11 @@ const bool BRAILLE_ALPHABET[26][3][2] = {
 // =========================================================================
 
 // Function 1: Zeroes Z at the bottom start position, lifts Z strictly
-// ~1 cm (+18 deg) and pauses 150 ms BEFORE homing X all the way to the
-// motor-side stop via sustained-stall detection, checks DistanceBed
-// clearance, and calibrates OpticalPaper brightness.
-bool homeAllAxes(double &calibratedPressDeg, double &paperThreshold) {
+// ~1 cm (+18 deg) and pauses 450 ms BEFORE homing X all the way to the
+// motor-side stop via sustained-stall detection, auto-calibrates both
+// DistanceBed and OpticalPaper thresholds, and prints live readings.
+bool homeAllAxes(double &calibratedPressDeg, double &paperThreshold,
+                 double &distThreshold) {
     timer homingTimer;
     homingTimer.clear();
 
@@ -233,7 +235,7 @@ bool homeAllAxes(double &calibratedPressDeg, double &paperThreshold) {
 
     Brain.Screen.clearScreen();
     Brain.Screen.setCursor(1, 1);
-    Brain.Screen.print("v17 Lift Z ~1cm");
+    Brain.Screen.print("v18 Lift Z ~1cm");
 
     // 1. Start with stylus resting at the bottom; zero encoder cleanly
     // without jamming downward, then lift strictly +18 deg (~1 cm) BEFORE
@@ -259,7 +261,7 @@ bool homeAllAxes(double &calibratedPressDeg, double &paperThreshold) {
     // 2. With Z raised ~1 cm, home X-axis carriage ALL THE WAY to the
     // motor-side physical stop using sustained stall (180 ms continuous).
     Brain.Screen.newLine();
-    Brain.Screen.print("v17 Homing X...");
+    Brain.Screen.print("v18 Homing X...");
     homingTimer.clear();
     MotorX.spin(forward, 30, percent);
     int stallCount = 0;
@@ -281,22 +283,35 @@ bool homeAllAxes(double &calibratedPressDeg, double &paperThreshold) {
     MotorFeed.stop(coast);
     MotorFeed.setPosition(0, degrees);
 
-    // 4. Check DistanceBed for startup obstruction (< 25 mm).
+    // 3. Auto-calibrate DistanceBed threshold from clear-bed baseline.
+    wait(100, msec);
+    bool startDistDetected = DistanceBed.isObjectDetected();
     double measuredBedDist = DistanceBed.objectDistance(mm);
-    if (measuredBedDist > 0.0 && measuredBedDist < OBSTRUCTION_MIN_MM) {
+    if (startDistDetected && measuredBedDist > 0.0 &&
+        measuredBedDist < STARTUP_BLOCK_MM) {
         TouchStatus.on(red);
         Brain.Screen.clearScreen();
         Brain.Screen.setCursor(1, 1);
-        Brain.Screen.print("Fault:Bed<25mm");
+        Brain.Screen.print("Fault:Bed<20mm");
         wait(1000, msec);
         return false;
     }
 
-    // 5. Auto-calibrate OpticalPaper brightness from loaded paper.
-    wait(100, msec);
+    distThreshold = OBSTRUCTION_MIN_MM;
+    if (startDistDetected && measuredBedDist > 50.0 &&
+        measuredBedDist < 1800.0) {
+        distThreshold = measuredBedDist * 0.65;
+        if (distThreshold < 40.0) {
+            distThreshold = 40.0;
+        } else if (distThreshold > 100.0) {
+            distThreshold = 100.0;
+        }
+    }
+
+    // 4. Auto-calibrate OpticalPaper brightness from startup state.
     double startBright = OpticalPaper.brightness();
-    if (startBright >= 20.0) {
-        paperThreshold = startBright * 0.5;
+    if (startBright >= 15.0) {
+        paperThreshold = startBright * 0.55;
     } else {
         paperThreshold = 0.0;
     }
@@ -304,21 +319,21 @@ bool homeAllAxes(double &calibratedPressDeg, double &paperThreshold) {
     TouchStatus.on(blue);
     Brain.Screen.clearScreen();
     Brain.Screen.setCursor(1, 1);
-    Brain.Screen.print("v17 Ready!");
+    Brain.Screen.print("v18 Ready Z:+%.0f", MotorZ.position(degrees));
     Brain.Screen.newLine();
-    Brain.Screen.print("Z:+%.0f B:%.0f%%",
-                       MotorZ.position(degrees), startBright);
+    Brain.Screen.print("B:%.0f%% T:%.0f%%", startBright, paperThreshold);
     Brain.Screen.newLine();
-    Brain.Screen.print("Dist: %.0fmm", measuredBedDist);
-    wait(900, msec);
+    Brain.Screen.print("D:%.0f T:%.0fmm", measuredBedDist, distThreshold);
+    wait(1800, msec);
     return true;
 }
 
-// Function 2: Polls TouchStatus (manual pause), OpticalPaper (paper-out),
-// and DistanceBed (obstruction < 25 mm). Halts all 3 motors safely on a
-// trigger and waits up to 25 s for recovery and TouchStatus confirmation.
+// Function 2: Polls TouchStatus (manual pause), OpticalPaper (paper-out
+// or cover/proximity), and DistanceBed (object closer than distThreshold).
+// Called before every dot slot; halts all 3 motors safely on trigger and
+// waits up to 25 s for recovery and TouchStatus (or Brain Check) resume.
 bool checkSafetyAndPaper(bool &isPaused, timer &jobTimer,
-                         double paperThreshold) {
+                         double paperThreshold, double distThreshold) {
     if (TouchStatus.pressing()) {
         isPaused = true;
         while (TouchStatus.pressing()) {
@@ -326,21 +341,22 @@ bool checkSafetyAndPaper(bool &isPaused, timer &jobTimer,
         }
     }
 
-    // Check calibrated brightness threshold; if sensor sits too far to
-    // read brightness at startup (paperThreshold == 0), only pause when a
-    // blue card (hue 180-260) is held right in front of OpticalPaper.
     double optBright = OpticalPaper.brightness();
+    bool optNear = OpticalPaper.isNearObject();
     bool paperMissing = false;
     if (paperThreshold > 0.0) {
+        // Paper was bright at startup: pause if removed or dark-covered.
         paperMissing = (optBright < paperThreshold);
-    } else if (OpticalPaper.isNearObject()) {
-        double seenHue = OpticalPaper.hue();
-        paperMissing = (seenHue >= 180.0 && seenHue <= 260.0);
+    } else {
+        // Sensor faced open air at startup: pause if ANY object/paper
+        // covers the optical sensor (proximity or brightness jump).
+        paperMissing = (optNear || optBright >= 25.0);
     }
 
+    bool distObj = DistanceBed.isObjectDetected();
     double bedClearanceMm = DistanceBed.objectDistance(mm);
     bool obstructionDetected =
-        (bedClearanceMm > 0.0 && bedClearanceMm < OBSTRUCTION_MIN_MM);
+        (distObj && bedClearanceMm < distThreshold);
 
     if (paperMissing || obstructionDetected) {
         isPaused = true;
@@ -359,9 +375,9 @@ bool checkSafetyAndPaper(bool &isPaused, timer &jobTimer,
     Brain.Screen.clearScreen();
     Brain.Screen.setCursor(1, 1);
     if (paperMissing) {
-        Brain.Screen.print("PAUSED:No Paper");
+        Brain.Screen.print("PAUSED:Optical");
     } else if (obstructionDetected) {
-        Brain.Screen.print("PAUSED:Blocked");
+        Brain.Screen.print("PAUSED:Distance");
     } else {
         Brain.Screen.print("PAUSED:User");
     }
@@ -376,18 +392,19 @@ bool checkSafetyAndPaper(bool &isPaused, timer &jobTimer,
     bool resumed = false;
 
     while (pauseTimer.time(seconds) < 25.0 && !resumed) {
+        double nowBright = OpticalPaper.brightness();
+        bool nowNear = OpticalPaper.isNearObject();
         bool paperPresentNow = true;
         if (paperThreshold > 0.0) {
-            paperPresentNow = (OpticalPaper.brightness() >= paperThreshold);
-        } else if (OpticalPaper.isNearObject()) {
-            double nowHue = OpticalPaper.hue();
-            paperPresentNow = !(nowHue >= 180.0 && nowHue <= 260.0);
+            paperPresentNow = (nowBright >= paperThreshold);
+        } else {
+            paperPresentNow = (!nowNear && nowBright < 25.0);
         }
 
+        bool nowDistObj = DistanceBed.isObjectDetected();
         double currentClearance = DistanceBed.objectDistance(mm);
         bool pathClearNow =
-            (currentClearance <= 0.0 ||
-             currentClearance >= OBSTRUCTION_MIN_MM);
+            (!nowDistObj || currentClearance >= distThreshold);
 
         bool ledResume =
             TouchStatus.pressing() && paperPresentNow && pathClearNow;
@@ -508,21 +525,18 @@ int selectWordFromController(char wordBuffer[], int maxLen) {
 }
 
 // Function 4: Updates the VEX IQ Brain LCD with the active character,
-// active Braille row (1-3), completion percentage, cumulative punched
-// dots, and elapsed job time (all strings <= 16 chars for Brain LCD).
+// active Braille row (1-3), dots punched, live sensor readings (Optical
+// brightness % and Distance mm), and elapsed time (<= 16 chars/line).
 void updateLiveTelemetry(char currentChar, int rowIndex, int totalRows,
                          int dotsPunched, timer &jobTimer) {
-    int percentDone = 0;
-    if (totalRows > 0) {
-        percentDone = ((rowIndex + 1) * 100) / totalRows;
-    }
-
     Brain.Screen.clearScreen();
     Brain.Screen.setCursor(1, 1);
-    Brain.Screen.print("Row %d/%d '%c'",
-                       rowIndex + 1, totalRows, currentChar);
+    Brain.Screen.print("R%d/%d '%c' D:%d",
+                       rowIndex + 1, totalRows, currentChar, dotsPunched);
     Brain.Screen.newLine();
-    Brain.Screen.print("Done:%d%% D:%d", percentDone, dotsPunched);
+    Brain.Screen.print("B:%.0f%% D:%.0fmm",
+                       OpticalPaper.brightness(),
+                       DistanceBed.objectDistance(mm));
     Brain.Screen.newLine();
     Brain.Screen.print("Time: %.1fs", jobTimer.time(seconds));
 }
@@ -860,6 +874,7 @@ int main() {
 
     double calibratedPressDeg = Z_MAX_DOWN_TRAVEL;
     double paperThreshold = 0.0;
+    double distThreshold = OBSTRUCTION_MIN_MM;
     char wordBuffer[MAX_WORD_LENGTH];
     bool wordCells[MAX_WORD_LENGTH][3][2];
     bool charValid[MAX_WORD_LENGTH];
@@ -868,7 +883,7 @@ int main() {
     int totalDotsPunched = 0;
     int validCharCount = 0;
 
-    if (!homeAllAxes(calibratedPressDeg, paperThreshold)) {
+    if (!homeAllAxes(calibratedPressDeg, paperThreshold, distThreshold)) {
         executeCleanShutdown(0, 0, 0.0, FAULT_BED_BLOCKED);
         return 0;
     }
@@ -897,7 +912,8 @@ int main() {
     // reversal backlash between dots and matches BrailleBasePlate spacing.
     int row = 0;
     while (row < 3 && faultCode == FAULT_NONE) {
-        if (!checkSafetyAndPaper(isPaused, jobTimer, paperThreshold)) {
+        if (!checkSafetyAndPaper(isPaused, jobTimer,
+                                 paperThreshold, distThreshold)) {
             faultCode = FAULT_SAFETY_TIMEOUT;
         }
 
@@ -906,30 +922,37 @@ int main() {
             if (charValid[charIdx] && wordBuffer[charIdx] != ' ') {
                 int col = 0;
                 while (col < 2 && faultCode == FAULT_NONE) {
-                    int effectiveCol = col;
-                    if (MIRROR_COLUMNS_FOR_DOWNWARD_PUNCH) {
-                        effectiveCol = 1 - col;
-                    }
-
-                    // Step sideways to this dot slot, then decide whether
-                    // to punch down or skip and move to the next slot.
-                    if (!moveCarriageToColumn(charIdx, effectiveCol,
-                                              COL_ZERO_DEG,
-                                              INTRA_COL_DEG,
-                                              CHAR_PITCH_DEG)) {
-                        faultCode = FAULT_X_STALL;
-                    } else if (wordCells[charIdx][row][col]) {
-                        if (!punchBrailleDot(calibratedPressDeg,
-                                             PUNCH_DWELL_MSEC)) {
-                            faultCode = FAULT_Z_LIFT;
-                        } else {
-                            totalDotsPunched++;
-                            updateLiveTelemetry(wordBuffer[charIdx], row,
-                                                3, totalDotsPunched,
-                                                jobTimer);
-                        }
+                    if (!checkSafetyAndPaper(isPaused, jobTimer,
+                                             paperThreshold,
+                                             distThreshold)) {
+                        faultCode = FAULT_SAFETY_TIMEOUT;
                     } else {
-                        wait(100, msec);
+                        int effectiveCol = col;
+                        if (MIRROR_COLUMNS_FOR_DOWNWARD_PUNCH) {
+                            effectiveCol = 1 - col;
+                        }
+
+                        // Step sideways to this dot slot, then decide
+                        // whether to punch down or skip to next slot.
+                        if (!moveCarriageToColumn(charIdx, effectiveCol,
+                                                  COL_ZERO_DEG,
+                                                  INTRA_COL_DEG,
+                                                  CHAR_PITCH_DEG)) {
+                            faultCode = FAULT_X_STALL;
+                        } else if (wordCells[charIdx][row][col]) {
+                            if (!punchBrailleDot(calibratedPressDeg,
+                                                 PUNCH_DWELL_MSEC)) {
+                                faultCode = FAULT_Z_LIFT;
+                            } else {
+                                totalDotsPunched++;
+                                updateLiveTelemetry(wordBuffer[charIdx],
+                                                    row, 3,
+                                                    totalDotsPunched,
+                                                    jobTimer);
+                            }
+                        } else {
+                            wait(100, msec);
+                        }
                     }
                     col++;
                 }
@@ -940,8 +963,12 @@ int main() {
         // After finishing a full horizontal row, return X left and step
         // paper forward by 1 Braille dot row (3.5 mm) for the next row.
         if (faultCode == FAULT_NONE && row < 2) {
-            if (!moveCarriageToColumn(-1, 0, COL_ZERO_DEG,
-                                      INTRA_COL_DEG, CHAR_PITCH_DEG)) {
+            if (!checkSafetyAndPaper(isPaused, jobTimer,
+                                     paperThreshold, distThreshold)) {
+                faultCode = FAULT_SAFETY_TIMEOUT;
+            } else if (!moveCarriageToColumn(-1, 0, COL_ZERO_DEG,
+                                             INTRA_COL_DEG,
+                                             CHAR_PITCH_DEG)) {
                 faultCode = FAULT_X_STALL;
             } else if (!advancePaperStrip(ROW_FEED_DEG, true)) {
                 faultCode = FAULT_Y_JAM;
