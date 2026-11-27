@@ -220,7 +220,7 @@ bool homeAllAxes(double &calibratedPunchDeg, double &paperThreshold) {
 
     Brain.Screen.clearScreen();
     Brain.Screen.setCursor(1, 1);
-    Brain.Screen.print("Homing Z-Axis...");
+    Brain.Screen.print("v6 Homing Z...");
 
     // Gently snug Z-axis stylus upward (start with pusher raised to max)
     // using a short 400 ms guard so the rack never runs off the 60T gear.
@@ -233,15 +233,18 @@ bool homeAllAxes(double &calibratedPunchDeg, double &paperThreshold) {
     MotorZ.stop(hold);
     MotorZ.setPosition(0, degrees);
 
-    // Home X-axis bearing carriage to left end-stop via VEX chain drive.
+    // Home X-axis bearing carriage ALL THE WAY to the left end-stop.
+    // Checks actual shaft velocity (< 2 rpm) + current (>= 1.15 A) after
+    // 350 ms so brief chain friction mid-rail never stops homing early.
     Brain.Screen.newLine();
-    Brain.Screen.print("Homing X-Axis...");
+    Brain.Screen.print("v6 Homing X...");
     homingTimer.clear();
-    MotorX.spin(forward, 12, percent);
-    while (homingTimer.time(msec) < 4000 &&
-           (homingTimer.time(msec) < 150 ||
-            MotorX.current(amp) < HOMING_STALL_AMP)) {
-        wait(10, msec);
+    MotorX.spin(forward, 22, percent);
+    while (homingTimer.time(msec) < 6000 &&
+           (homingTimer.time(msec) < 350 ||
+            (fabs(MotorX.velocity(rpm)) > 2.0 &&
+             MotorX.current(amp) < STALL_CURRENT_AMP))) {
+        wait(15, msec);
     }
     MotorX.stop(brake);
     MotorX.setPosition(0, degrees);
@@ -251,8 +254,10 @@ bool homeAllAxes(double &calibratedPunchDeg, double &paperThreshold) {
     MotorFeed.setPosition(0, degrees);
 
     // Auto-calibrate OpticalPaper brightness threshold from loaded paper.
+    // Only arm brightness threshold if sensor reads >= 20% reliably.
+    wait(120, msec);
     double startBright = OpticalPaper.brightness();
-    if (startBright >= 5.0) {
+    if (startBright >= 20.0) {
         paperThreshold = startBright * 0.5;
     } else {
         paperThreshold = 0.0;
@@ -301,16 +306,14 @@ bool checkSafetyAndPaper(bool &isPaused, timer &jobTimer,
 
     // Check calibrated brightness threshold; if sensor sits too far to
     // read brightness at startup (paperThreshold == 0), only pause when a
-    // contrasting blue/green dark card is placed right under the sensor
-    // (never false-trigger on idle hue = 0 / red).
+    // bright blue card (hue 180-260) is held right in front of the sensor.
     double optBright = OpticalPaper.brightness();
     bool paperMissing = false;
     if (paperThreshold > 0.0) {
         paperMissing = (optBright < paperThreshold);
     } else if (OpticalPaper.isNearObject()) {
-        color seenCol = OpticalPaper.color();
-        paperMissing = (seenCol == colorType::blue ||
-                        seenCol == colorType::green);
+        double seenHue = OpticalPaper.hue();
+        paperMissing = (seenHue >= 180.0 && seenHue <= 260.0);
     }
 
     double bedClearanceMm = DistanceBed.objectDistance(mm);
@@ -355,9 +358,8 @@ bool checkSafetyAndPaper(bool &isPaused, timer &jobTimer,
         if (paperThreshold > 0.0) {
             paperPresentNow = (OpticalPaper.brightness() >= paperThreshold);
         } else if (OpticalPaper.isNearObject()) {
-            color nowCol = OpticalPaper.color();
-            paperPresentNow = (nowCol != colorType::blue &&
-                               nowCol != colorType::green);
+            double nowHue = OpticalPaper.hue();
+            paperPresentNow = !(nowHue >= 180.0 && nowHue <= 260.0);
         }
 
         double currentClearance = DistanceBed.objectDistance(mm);
